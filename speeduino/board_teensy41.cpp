@@ -28,9 +28,14 @@
 *
 * The DropBear v2 mainboard carries a Winbond W25Q32JVSS (U3) wired to the Teensy 4.1 as a
 * normal single-bit SPI device:
-*   /CS = pin 8,  DI/IO0 = pin 11 (MOSI),  DO/IO1 = pin 12 (MISO),  CLK = pin 13 (SCK)
+*   /CS = pin 6,  DI/IO0 = pin 11 (MOSI),  DO/IO1 = pin 12 (MISO),  CLK = pin 13 (SCK)
 * /WP (IO2) and /HOLD (IO3) are hard-tied to +3V3 on the PCB, so quad/QSPI mode cannot be
 * used even when a QSPI-capable part is fitted. The existing winbondFlashSPI driver handles it.
+*
+* NOTE on the CS pin: in the KiCad sources the CS net is "MCU-D6", which lands on U1 pad 8.
+* In the Teensy4.1 schematic symbol the (number "N") field is the module *pad index*, not the
+* Teensy pin number. Pad 8 is named "6_OUT1D", i.e. Teensy pin 6. (Teensy pin 8 is pad 10,
+* "8_TX2_IN1" / GPIO_B1_00.) So CS is Teensy pin 6.
 *
 * IMPORTANT: these pins are the Teensy's LPSPI4 (the global `SPI` object) and are *shared*
 * with both MC33810 injector/ignition drivers (U7/U8, CS on pins 9 and 10). The MC33810
@@ -38,7 +43,7 @@
 * beginTransaction() only reprograms the port when the clock actually changes. So the flash
 * MUST run at the same clock/mode as the MC33810s, or the two will corrupt each other.
 */
-static constexpr uint8_t  PIN_SPI_FLASH_CS   = 8U;       // DropBear v2 U3 /CS
+static constexpr uint8_t  PIN_SPI_FLASH_CS   = 6U;       // DropBear v2 U3 /CS (net MCU-D6)
 static constexpr uint32_t SPI_FLASH_CLOCK_HZ = 6000000U; // Must match acc_mc33810.cpp
 
 // 255 sectors * 31 bytes = 7905 bytes of emulated EEPROM. Speeduino only addresses
@@ -59,14 +64,19 @@ static SPI_EEPROM_Class flashEEPROM(EmulatedEEPROMMconfig, SPIconfig);
  */
 static bool initialiseFlashEEPROM(void)
 {
-  static int8_t flashState = -1; // -1 = not yet attempted, 0 = unavailable, 1 = ready
-  if (flashState < 0)
+  static bool initialised = false; // Only probe the chip once
+  if (!initialised)
   {
+    initialised = true;
     SPI.begin();
     SPI.beginTransaction(SPISettings(SPI_FLASH_CLOCK_HZ, MSBFIRST, SPI_MODE0));
-    flashState = flashEEPROM.begin(SPI, PIN_SPI_FLASH_CS);
+    bool available = flashEEPROM.begin(SPI, PIN_SPI_FLASH_CS);
+    // Publish which backend we ended up on so TunerStudio can report it (status5 bits 6-7)
+    currentStatus.storageBackend = available
+      ? statuses::StorageBackend::ExternalFlash
+      : statuses::StorageBackend::NotDetected;
   }
-  return flashState == 1;
+  return currentStatus.storageBackend == statuses::StorageBackend::ExternalFlash;
 }
 
 // storage_api_t adapters for the emulated EEPROM held in the external SPI flash.

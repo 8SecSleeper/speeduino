@@ -102,7 +102,10 @@ static byte buildStatus5(const statuses &current)
     current.knockPulseDetected,
     current.launchStatus.clutchTrigger,
   };
-  return setStatusBits(0U, bits);
+  byte status5 = setStatusBits(0U, bits);
+  // Bits 6-7 report which EEPROM storage backend is in use (see statuses::StorageBackend).
+  status5 |= (static_cast<uint8_t>(current.storageBackend) & 0x03U) << 6U;
+  return status5;
 }
 
 byte buildEngineStatus(const statuses &current)

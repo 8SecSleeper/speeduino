@@ -355,6 +355,19 @@ struct statuses {
   // cppcheck-suppress misra-c2012-6.1 ; False positive - MISRA C:2012 Rule (R 6.1) permits the use of boolean for bit fields.
   bool sdCardUnused : 1;  ///< true if unused, false if not
 
+  /** @brief Which backend is being used for the EEPROM / tune storage.
+   *
+   * Reported to TunerStudio in status5 bits 6-7. Boards without a selectable
+   * backend always report StorageBackend::Internal.
+   */
+  enum class StorageBackend : uint8_t {
+    Internal = 0,      ///< On-chip EEPROM / internal emulated EEPROM
+    ExternalFlash = 1, ///< External SPI flash detected and in use
+    NotDetected = 2,   ///< External flash was expected but could not be found
+    Fallback = 3,      ///< Started on external flash then fell back to internal
+  };
+  StorageBackend storageBackend = StorageBackend::Internal;
+
   airConStatus_t acStatus = {};
   
   uint8_t systemTemp;
