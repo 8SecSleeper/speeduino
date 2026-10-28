@@ -177,6 +177,19 @@ bool winbondFlashClass::busy()
   return false;
 }
 
+bool winbondFlashClass::waitWhileBusy(uint32_t timeoutMs)
+{
+  const uint32_t start = millis();
+  while (busy())
+  {
+    if ((millis() - start) >= timeoutMs)
+    {
+      return false;
+    }
+  }
+  return true;
+}
+
 void winbondFlashClass::setWriteEnable(bool cmd)
 {
   select();

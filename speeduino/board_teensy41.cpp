@@ -46,12 +46,37 @@
 static constexpr uint8_t  PIN_SPI_FLASH_CS   = 6U;       // DropBear v2 U3 /CS (net MCU-D6)
 static constexpr uint32_t SPI_FLASH_CLOCK_HZ = 6000000U; // Must match acc_mc33810.cpp
 
-// 255 sectors * 31 bytes = 7905 bytes of emulated EEPROM. Speeduino only addresses
-// 0..4095 (see STORAGE_END in storage.cpp), so this comfortably covers the requirement.
+// The MC33810 chip selects are on the same LPSPI4 bus as the flash. They are only
+// configured later, in initMC33810(), which is after this file's flash init runs. Until
+// then those pins sit as inputs in an undefined state, so the driver ICs can drive MISO
+// while the flash is being formatted and corrupt the status reads. Driving both high
+// (deselected) before touching the flash prevents that. Kept in sync with
+// getDropBearMapping() in pinMapping.cpp.
+static constexpr uint8_t PIN_MC33810_1_CS = 10U;
+static constexpr uint8_t PIN_MC33810_2_CS = 9U;
+
+// 133 sectors * 31 bytes = 4123 bytes of emulated EEPROM. Speeduino only addresses
+// 0..4095 (see STORAGE_END in storage.cpp), so this is the smallest count that still
+// covers the requirement. It matters because initialize() formats EVERY sector on first
+// boot, and that cost is linear in the sector count - 255 sectors is a ~2x longer stall
+// on the boot path than 133. Raise this only if STORAGE_END grows.
 // The 1MB base address leaves the start of the chip untouched.
-static EEPROM_Emulation_Config EmulatedEEPROMMconfig{255UL, 4096UL, 31UL, 0x00100000UL};
+static EEPROM_Emulation_Config EmulatedEEPROMMconfig{133UL, 4096UL, 31UL, 0x00100000UL};
 static Flash_SPI_Config SPIconfig{PIN_SPI_FLASH_CS, &SPI};
 static SPI_EEPROM_Class flashEEPROM(EmulatedEEPROMMconfig, SPIconfig);
+
+/** @brief Park every other device on the shared SPI bus in the deselected state.
+ *
+ * Without this the MC33810s can drive MISO during flash access, which corrupts the
+ * flash's status register reads.
+ */
+static void deselectSharedSpiDevices(void)
+{
+  pinMode(PIN_MC33810_1_CS, OUTPUT);
+  digitalWrite(PIN_MC33810_1_CS, HIGH);
+  pinMode(PIN_MC33810_2_CS, OUTPUT);
+  digitalWrite(PIN_MC33810_2_CS, HIGH);
+}
 
 /** @brief Probe and initialise the external flash, once.
  *
@@ -68,6 +93,8 @@ static bool initialiseFlashEEPROM(void)
   if (!initialised)
   {
     initialised = true;
+    // Do this BEFORE SPI.begin() so nothing else can answer on MISO.
+    deselectSharedSpiDevices();
     SPI.begin();
     SPI.beginTransaction(SPISettings(SPI_FLASH_CLOCK_HZ, MSBFIRST, SPI_MODE0));
     bool available = flashEEPROM.begin(SPI, PIN_SPI_FLASH_CS);

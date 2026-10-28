@@ -251,6 +251,12 @@ int8_t FLASH_EEPROM_BaseClass::eraseFlashSector(uint32_t address __attribute__((
 // (U3) alongside the Teensy 4.1, wired as a normal single-bit SPI device.
 #if defined(ARDUINO_ARCH_STM32) || defined(CORE_TEENSY)
 
+// Upper bounds on how long we will wait for the flash to clear its busy flag.
+// These exist so a mis-configured chip select or a bus contention problem produces a
+// slow/failed access rather than an infinite hang in the middle of boot.
+static constexpr uint32_t FLASH_BUSY_TIMEOUT_MS  = 50U;   // status reads / page program
+static constexpr uint32_t FLASH_ERASE_TIMEOUT_MS = 1000U; // 4KB sector erase (400ms worst case)
+
 SPI_EEPROM_Class::SPI_EEPROM_Class(EEPROM_Emulation_Config EmulationConfig, Flash_SPI_Config SPIConfig):FLASH_EEPROM_BaseClass(EmulationConfig)
 {
   _configSPI = SPIConfig;
@@ -278,21 +284,25 @@ int8_t SPI_EEPROM_Class::begin(SPIClass &_spi, uint8_t pinSPIFlash_CS=6){
 }    
 
 int8_t SPI_EEPROM_Class::readFlashBytes(uint32_t address, byte *buf, uint32_t length){
-  while(winbondSPIFlash.busy());
+  // Bounded wait: a missing or contending chip must never hang the firmware during
+  // boot. Returning early leaves the caller with whatever was in the buffer.
+  (void)winbondSPIFlash.waitWhileBusy(FLASH_BUSY_TIMEOUT_MS);
   return winbondSPIFlash.read(address+_config.EEPROM_Flash_BaseAddress, buf, length);
 }
 
 int8_t SPI_EEPROM_Class::writeFlashBytes(uint32_t address, byte *buf, uint32_t length){
   winbondSPIFlash.setWriteEnable(true);
   winbondSPIFlash.writePage(address+_config.EEPROM_Flash_BaseAddress, buf, length);
-  while(winbondSPIFlash.busy());
+  (void)winbondSPIFlash.waitWhileBusy(FLASH_BUSY_TIMEOUT_MS);
   return 0;
 }
 
 int8_t SPI_EEPROM_Class::eraseFlashSector(uint32_t address, uint32_t length){
   winbondSPIFlash.setWriteEnable(true);
   winbondSPIFlash.eraseSector(address+_config.EEPROM_Flash_BaseAddress);
-  while(winbondSPIFlash.busy());
+  // A 4KB sector erase is typically ~45ms but can be up to 400ms per the datasheet,
+  // so allow generous headroom here rather than failing a legitimate erase.
+  (void)winbondSPIFlash.waitWhileBusy(FLASH_ERASE_TIMEOUT_MS);
   return 0;
 }
 

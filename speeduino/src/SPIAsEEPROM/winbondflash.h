@@ -66,6 +66,17 @@ public:
   void eraseResume();
 
   bool busy();
+
+  /** @brief Wait for the chip to clear its busy flag, with an upper bound.
+   *
+   * Unlike a bare <c>while(busy())</c>, this always terminates, so a missing chip or a
+   * bus contention problem degrades to a failed/slow access instead of hanging the
+   * firmware mid-boot.
+   *
+   * @param timeoutMs Maximum time to wait
+   * @return true if the chip became ready, false on timeout
+   */
+  bool waitWhileBusy(uint32_t timeoutMs);
   
   uint8_t  readManufacturer();
   uint16_t readPartID();

@@ -250,6 +250,10 @@ static void printHeader()
   Serial.println(F(" W = Write + verify a test pattern to the EEPROM region"));
   Serial.println(F(" E = Erase that sector and confirm it reads 0xFF"));
   Serial.println(F(" T = Time a sector erase (useful for boot-time estimates)"));
+  Serial.println(F(" F = FORMAT for Speeduino (all 255 sectors, magic numbers)"));
+  Serial.println(F("--------------------------------------------------------------"));
+  Serial.println(F(" NOTE: press F before flashing the firmware. It writes the magic"));
+  Serial.println(F(" numbers so the firmware skips its own slow first-boot format."));
   Serial.println(F("--------------------------------------------------------------"));
 }
 
@@ -384,6 +388,88 @@ static void doErase()
   Serial.printf("  first 64 bytes all 0xFF: %s\r\n", blank ? "YES" : "NO");
 }
 
+// ---------------------------------------------------------------------------
+// Speeduino-compatible format
+//
+// This replicates exactly what SPI_EEPROM_Class::initialize()/clear() does, so the
+// firmware finds a valid device and skips its own format on boot.
+//
+// Each of the 255 sectors gets the 4 "magic number" bytes at its start:
+//     C0 FF EE CC
+//   where CC = EEPROM_VERSION (204 = 0xCC for v2.0.4). If Speeduino's
+//   EEPROM_VERSION constant changes, FORMAT_MAGIC_4 below must be updated to match,
+//   or the firmware will decide the device needs formatting again.
+//
+// Note the leading offset: the emulated EEPROM lives at EEPROM_BASE_ADDR, so sector
+// N's magic numbers are at EEPROM_BASE_ADDR + N*4096.
+// ---------------------------------------------------------------------------
+static constexpr uint8_t FORMAT_MAGIC_1 = 0xC0;
+static constexpr uint8_t FORMAT_MAGIC_2 = 0xFF;
+static constexpr uint8_t FORMAT_MAGIC_3 = 0xEE;
+static constexpr uint8_t FORMAT_MAGIC_4 = 204;
+static constexpr uint32_t FORMAT_SECTORS = 255;
+
+static void doFormat()
+{
+  Serial.println(F("\r\n-- Format for Speeduino --"));
+  Serial.printf("  Writing magic numbers to %lu sectors at 0x%06lX..0x%06lX\r\n",
+                (unsigned long)FORMAT_SECTORS,
+                (unsigned long)EEPROM_BASE_ADDR,
+                (unsigned long)(EEPROM_BASE_ADDR + (FORMAT_SECTORS - 1) * SECTOR_SIZE));
+
+  ProbeResult r = probe(PIN_CS);
+  if (!r.responded) { Serial.println(F("  Aborting: no chip responded.")); return; }
+
+  const uint8_t magic[4] = { FORMAT_MAGIC_1, FORMAT_MAGIC_2, FORMAT_MAGIC_3, FORMAT_MAGIC_4 };
+  uint32_t t0 = millis();
+  uint32_t failures = 0;
+
+  for (uint32_t sector = 0; sector < FORMAT_SECTORS; sector++)
+  {
+    uint32_t addr = EEPROM_BASE_ADDR + (sector * SECTOR_SIZE);
+
+    eraseSector(addr);
+    if (!waitReady(5000)) { failures++; continue; }
+
+    programPage(addr, magic, sizeof(magic));
+    if (!waitReady(5000)) { failures++; continue; }
+
+    if ((sector % 25U) == 0U)
+    {
+      Serial.printf("  sector %3lu / %lu ...\r\n",
+                    (unsigned long)sector, (unsigned long)FORMAT_SECTORS);
+    }
+  }
+
+  uint32_t elapsed = millis() - t0;
+  Serial.printf("  done in %lu ms, %lu failure(s)\r\n",
+                (unsigned long)elapsed, (unsigned long)failures);
+
+  // Verify the first and last sectors read back correctly
+  Serial.println(F("  verifying..."));
+  bool ok = true;
+  for (uint32_t sector : { (uint32_t)0, FORMAT_SECTORS - 1 })
+  {
+    uint32_t addr = EEPROM_BASE_ADDR + (sector * SECTOR_SIZE);
+    uint8_t buf[4];
+    csLow();
+    xfer(CMD_READ_DATA);
+    sendAddr(addr);
+    for (uint8_t i = 0; i < 4; i++) { buf[i] = xfer(0xFF); }
+    csHigh();
+
+    bool good = (buf[0] == FORMAT_MAGIC_1) && (buf[1] == FORMAT_MAGIC_2) &&
+                (buf[2] == FORMAT_MAGIC_3) && (buf[3] == FORMAT_MAGIC_4);
+    Serial.printf("    sector %3lu at 0x%06lX: %02X %02X %02X %02X  %s\r\n",
+                  (unsigned long)sector, (unsigned long)addr,
+                  buf[0], buf[1], buf[2], buf[3], good ? "OK" : "BAD");
+    ok = ok && good;
+  }
+
+  if (ok) { Serial.println(F("  RESULT: formatted. The firmware should now boot without formatting.")); }
+  else    { Serial.println(F("  RESULT: FAILED. Do not flash the firmware yet; report these bytes.")); }
+}
+
 static void doTiming()
 {
   Serial.println(F("\r\n-- Sector erase timing --"));
@@ -450,8 +536,9 @@ void loop()
     case 'W': doWriteTest(); break;
     case 'E': doErase();     break;
     case 'T': doTiming();    break;
+    case 'F': doFormat();    break;
     default:
-      Serial.println(F("  Unknown key. R/A/P/S/D/W/E/T."));
+      Serial.println(F("  Unknown key. R/A/P/S/D/W/E/T/F."));
       break;
   }
   Serial.println(F("\r\n Press a key from the menu."));
