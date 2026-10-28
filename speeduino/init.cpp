@@ -126,10 +126,25 @@ void initialiseAll(void)
     // Unit tests should be independent of any stored configuration on the board!
 #if !defined(UNIT_TEST)
     setStorageAPI(getBoardStorageApi());
+#if defined(CORE_TEENSY) && defined(USE_SPI_EEPROM)
+    boardBootTrace(0x30); // storage API installed
+#endif
     processResetStorageRequest();
+#if defined(CORE_TEENSY) && defined(USE_SPI_EEPROM)
+    boardBootTrace(0x31); // reset-storage check done
+#endif
     loadAllPages();
+#if defined(CORE_TEENSY) && defined(USE_SPI_EEPROM)
+    boardBootTrace(0x32); // all config pages loaded
+#endif
     loadAllCalibrationTables(); 
+#if defined(CORE_TEENSY) && defined(USE_SPI_EEPROM)
+    boardBootTrace(0x33); // calibration tables loaded
+#endif
     doUpdates(); //Check if any data items need updating (Occurs with firmware updates)
+#if defined(CORE_TEENSY) && defined(USE_SPI_EEPROM)
+    boardBootTrace(0x34); // updates done
+#endif
 #endif
 
     //Always start with a clean slate on the bootloader capabilities level
@@ -137,7 +152,13 @@ void initialiseAll(void)
     configPage4.bootloaderCaps = 0;
     
     initBoard(115200); //This calls the current individual boards init function. See the board_xxx.ino files for these.
+#if defined(CORE_TEENSY) && defined(USE_SPI_EEPROM)
+    boardBootTrace(0x35); // initBoard() done
+#endif
     initialiseTimers();
+#if defined(CORE_TEENSY) && defined(USE_SPI_EEPROM)
+    boardBootTrace(0x36); // timers done
+#endif
     
   #ifdef SD_LOGGING
     initRTC();

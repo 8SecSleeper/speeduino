@@ -53,16 +53,19 @@ static const char *describe(uint8_t v)
     case 0x18: return "flash init complete";
     case 0x20: return "returning SPI-flash storage API";
     case 0x21: return "returning internal-EEPROM storage API";
+    case 0x30: return "storage API installed";
+    case 0x31: return "reset-storage check done";
+    case 0x32: return "ALL CONFIG PAGES LOADED";
+    case 0x33: return "calibration tables loaded";
+    case 0x34: return "doUpdates() done";
+    case 0x35: return "initBoard() done";
+    case 0x36: return "timers done";
     default:   return "?";
   }
 }
 
-static void setup()
+static void printTrace()
 {
-  Serial.begin(115200);
-  uint32_t t0 = millis();
-  while (!Serial && (millis() - t0) < 3000) { }
-
   Serial.println();
   Serial.println(F("=============================================="));
   Serial.println(F(" Speeduino boot trace (read only)"));
@@ -111,4 +114,23 @@ static void setup()
   Serial.println(F("=============================================="));
 }
 
-void loop() { }
+static void setup()
+{
+  Serial.begin(115200);
+  uint32_t t0 = millis();
+  while (!Serial && (millis() - t0) < 3000) { }
+  printTrace();
+}
+
+// Reprint periodically. The trace is printed once in setup(), which is easy to miss
+// if the serial monitor attaches afterwards, so keep repeating it instead of sitting
+// silent until the next power cycle.
+void loop()
+{
+  static uint32_t lastPrint = 0;
+  if (millis() - lastPrint >= 5000U)
+  {
+    lastPrint = millis();
+    printTrace();
+  }
+}

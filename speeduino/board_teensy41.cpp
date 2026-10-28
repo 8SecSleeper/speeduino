@@ -21,6 +21,41 @@
 #include "src/controllers/boost/boostController.h"
 #include "globals.h"
 
+/*
+***********************************************************************************************************
+* Boot trace ("black box")
+*
+* The failure mode we are chasing resets the CPU before USB enumerates, so there is no
+* way to print where it died. The Teensy's internal EEPROM DOES work and survives a
+* reset, so write a marker at each milestone. Read them back afterwards with
+* tools/boot_trace - no serial needed during the failure.
+*
+* Stored above the 4096 bytes Speeduino uses for the tune, so it cannot corrupt a tune.
+*/
+static constexpr uint16_t BOOT_TRACE_BASE = 4220U;
+static constexpr uint16_t BOOT_TRACE_LEN  = 48U;
+static uint8_t bootTraceIndex = 0;
+
+/** @brief Clear the trace. Call first, so stale markers are not mistaken for progress. */
+static void bootTraceReset(void)
+{
+  bootTraceIndex = 0;
+  for (uint16_t i = 0; i < BOOT_TRACE_LEN; i++) { EEPROM.update(BOOT_TRACE_BASE + i, 0xFF); }
+}
+
+/** @brief Record progress. Markers are small codes, see boot_trace sketch for the list. */
+static void bootTrace(uint8_t marker)
+{
+  if (bootTraceIndex < BOOT_TRACE_LEN)
+  {
+    EEPROM.update(BOOT_TRACE_BASE + bootTraceIndex, marker);
+    ++bootTraceIndex;
+  }
+}
+
+/** @brief Public wrapper so init.cpp can drop markers along the shared boot path. */
+void boardBootTrace(uint8_t marker) { bootTrace(marker); }
+
 #if defined(USE_SPI_EEPROM)
 /*
 ***********************************************************************************************************
@@ -82,37 +117,9 @@ static void deselectSharedSpiDevices(void)
   digitalWrite(PIN_MC33810_2_CS, HIGH);
 }
 
-/*
-***********************************************************************************************************
-* Boot trace ("black box")
-*
-* The failure mode we are chasing resets the CPU before USB enumerates, so there is no
-* way to print where it died. The Teensy's internal EEPROM DOES work and survives a
-* reset, so write a marker at each milestone. Read them back afterwards with
-* tools/boot_trace - no serial needed during the failure.
-*
-* Stored above the 4096 bytes Speeduino uses for the tune, so it cannot corrupt a tune.
-*/
-static constexpr uint16_t BOOT_TRACE_BASE = 4220U;
-static constexpr uint16_t BOOT_TRACE_LEN  = 48U;
-static uint8_t bootTraceIndex = 0;
+#endif // USE_SPI_EEPROM
 
-/** @brief Clear the trace. Call first, so stale markers are not mistaken for progress. */
-static void bootTraceReset(void)
-{
-  bootTraceIndex = 0;
-  for (uint16_t i = 0; i < BOOT_TRACE_LEN; i++) { EEPROM.update(BOOT_TRACE_BASE + i, 0xFF); }
-}
-
-/** @brief Record progress. Markers are small codes, see boot_trace sketch for the list. */
-static void bootTrace(uint8_t marker)
-{
-  if (bootTraceIndex < BOOT_TRACE_LEN)
-  {
-    EEPROM.update(BOOT_TRACE_BASE + bootTraceIndex, marker);
-    ++bootTraceIndex;
-  }
-}
+#if defined(USE_SPI_EEPROM)
 
 /** @brief Prepare the emulated EEPROM in the onboard SPI flash.
  *

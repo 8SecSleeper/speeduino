@@ -50,6 +50,16 @@ storage_api_t getBoardStorageApi(void);
 /** @brief Get the PWM timer resolution in uS */
 uint8_t getPwmTimerResolution(void);
 
+#if defined(CORE_TEENSY) && defined(USE_SPI_EEPROM)
+/** @brief Record a boot-progress marker in the internal EEPROM ("black box").
+ *
+ * Used to find where a boot dies when the failure resets the CPU before USB
+ * enumerates and there is therefore no serial output. Read back with
+ * tools/boot_trace.
+ */
+void boardBootTrace(uint8_t marker);
+#endif
+
 ///@cond 
 // Shared building blocks for the board headers
 #define _ANALOG_PINS_A0_A8  A0, A1, A2, A3, A4, A5, A6, A7, A8
