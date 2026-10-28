@@ -174,7 +174,11 @@ void initialiseAll(void)
       //First time running on this board
       setTuneToEmpty();
       configPage4.triggerTeeth = 4; //Avoiddiv by 0 when start decoders
-      configPage2.pinMapping = 3; //Force board to v0.4
+      // A board with a fixed pinout cannot use the generic v0.4 mapping. Falling back
+      // to board 3 on a DropBear sets up entirely the wrong pins, because that mapping
+      // is for an AVR shield. Ask the board what it should use; 0 means "use the default".
+      const uint8_t boardDefaultMapping = getBoardDefaultPinMapping();
+      configPage2.pinMapping = (boardDefaultMapping != 0U) ? boardDefaultMapping : 3U;
     }
     setPinMapping(configPage2.pinMapping);
 

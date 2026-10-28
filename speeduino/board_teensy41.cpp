@@ -635,4 +635,22 @@ uint8_t getPwmTimerResolution(void)
   return 2;
 }
 
+/** @brief Default pin mapping for a blank tune.
+ *
+ * A freshly formatted EEPROM reads back as 0xFF, so configPage2.pinMapping is 255 and
+ * the generic fallback would select board 3 (Speeduino v0.4). That is an AVR shield
+ * mapping and sets up completely wrong pins on a DropBear v2, whose pinout is fixed.
+ * Initialising with it put the injector/ignition outputs, including the MC33810 chip
+ * selects on the shared SPI bus, onto unrelated pins - which is what made a first boot
+ * on a blank external flash reset-loop.
+ *
+ * Board 55 is the DropBear in getPinMapping(). The Teensy 4.1 is also used by the Bear
+ * Cub (56), so this is not ideal, but 55 is the mapping this firmware has always used
+ * for the T4.1 target and choosing it is no worse than the previous forced 3.
+ */
+uint8_t getBoardDefaultPinMapping(void)
+{
+  return 55U; // DropBear
+}
+
 #endif

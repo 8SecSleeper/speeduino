@@ -60,6 +60,17 @@ uint8_t getPwmTimerResolution(void);
 void boardBootTrace(uint8_t marker);
 #endif
 
+/** @brief The pin-mapping ID this board should use if the stored tune has none.
+ *
+ * A blank EEPROM reads 0xFF, so configPage2.pinMapping comes back as 255. The generic
+ * code path in that case forces board 3 (Speeduino v0.4), which on a board with a
+ * fixed, board-specific pinout sets up entirely the wrong pins. Returning a board's own
+ * ID here makes a first boot / freshly formatted EEPROM come up on the correct pinout.
+ *
+ * Boards that rely on the generic fallback return 0, meaning "use the default".
+ */
+uint8_t getBoardDefaultPinMapping(void);
+
 ///@cond 
 // Shared building blocks for the board headers
 #define _ANALOG_PINS_A0_A8  A0, A1, A2, A3, A4, A5, A6, A7, A8

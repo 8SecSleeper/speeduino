@@ -168,6 +168,9 @@ storage_api_t getBoardStorageApi(void)
   return getEEPROMStorageApi(getEepromWriteBlockSize);
 }
 
+/** @brief Default pin mapping for a blank tune. 0 = use the existing generic fallback. */
+uint8_t getBoardDefaultPinMapping(void) { return 0U; }
+
 /** @brief Get the PWM timer resolution in uS */
 uint8_t getPwmTimerResolution(void)
 {
