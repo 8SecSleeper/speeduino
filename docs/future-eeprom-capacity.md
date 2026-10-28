@@ -1,8 +1,9 @@
 # Future Plan — Enlarging Speeduino's EEPROM address space
 
-Status: **not implemented.** Current work keeps the proven emulated EEPROM layout so
-existing tunes stay compatible. This document records what must change *when* more tables
-are added and the space runs out.
+Status: **PARTIALLY DONE.** The emulated EEPROM has been grown to 768 sectors = 23,808 bytes
+(`0x0000..0x5CFF`), which is the physical maximum for the W25Q32. `STORAGE_END` remains
+`0xFFF` so the core tune layout is unchanged and existing tunes stay compatible. The space
+`0x1000..0x5CFF` is available for custom tables; see `AGENTS.md` §2A for the policy.
 
 > **Standing policy — see `AGENTS.md` §2A.** All new/custom tables go at **`0x1000` and
 > above**; `0x0000–0x0FFF` is a frozen ABI and is never modified. This fork does not support
@@ -89,10 +90,10 @@ space you multiply **sectors**, not bytes-per-sector:
 
 | Target space | Sectors | B/sector | Emulated bytes | Slot size |
 |---|---|---|---|---|
-| 4 KB (today) | 133 | 31 | 4123 | 128 B |
+| 4 KB (core) | 133 | 31 | 4123 | 128 B |
 | 8 KB | 265 | 31 | 8215 | 128 B |
 | 15 KB | 511 | 31 | 15841 | 128 B |
-| 23 KB (max) | 768 | 31 | 23808 | 128 B |
+| 23 KB (max, current) | 768 | 31 | 23808 | 128 B |
 
 Keep `B/sector = 31` and only raise the sector count — that keeps slot size at the
 128-byte buffer limit and keeps wear-levelling behaviour identical.

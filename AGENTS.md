@@ -37,10 +37,11 @@ Tune storage is the **onboard Winbond W25Q32JVSS (U3)** SPI flash, 4 MB, accesse
 emulated EEPROM. **This is a permanent decision, not a temporary workaround.**
 
 - Bytes 0..4095 of the emulated EEPROM are the tune (`STORAGE_END = 0xFFF`).
-- Geometry: `EEPROM_Emulation_Config{133, 4096, 31, 0x00100000}` — 133 sectors, 4 KB each,
-  31 bytes/sector, based at **1 MB** into the chip. That yields 4,123 emulated bytes, i.e.
-  only 28 bytes more than the core range — it is sized to the core tune, not to spare
-  capacity. See §2.1 before planning anything larger.
+- Geometry: `EEPROM_Emulation_Config{768, 4096, 31, 0x00100000}` — **768 sectors**, 4 KB
+  each, 31 bytes/sector, based at **1 MB** into the chip. That yields **23,808 emulated
+  bytes, addresses `0x0000..0x5CFF`** — the physical maximum for this part.
+- `0x0000–0x0FFF` is the core tune (frozen ABI, see §2A). **`0x1000–0x5CFF` is free for
+  custom tables** — 19,713 bytes.
 - Exposed as a `storage_api_t` from `getBoardStorageApi()` in `board_teensy41.cpp`.
 
 **Never revert to the Teensy's internal emulated EEPROM as the primary store.** It is only
@@ -64,10 +65,10 @@ The W25Q32 is **4 MB**. The emulation base is **1 MB** (`0x00100000`), which lea
 
 | Sectors | Emulated bytes | Highest address | Physical end | Verdict |
 |---|---|---|---|---|
-| 133 (current) | 4,123 | `0x101A` | `0x00185000` | fits |
+| 133 (old) | 4,123 | `0x101A` | `0x00185000` | was current |
 | 265 | 8,215 | `0x2016` | `0x00209000` | fits |
 | 511 | 15,841 | `0x3DE0` | `0x002FF000` | fits |
-| **768** | **23,808** | `0x5CFF` | `0x00400000` | **hard ceiling** |
+| **768 (current)** | **23,808** | **`0x5CFF`** | `0x00400000` | **hard ceiling** |
 | 1023 | 31,713 | — | overflows chip | **impossible** |
 | 4095 | 126,945 | — | overflows chip by 13 MB | **impossible** |
 
@@ -77,26 +78,30 @@ The W25Q32 is **4 MB**. The emulation base is **1 MB** (`0x00100000`), which lea
 rows were wrong — both run past the end of the chip — and have been corrected. Use the table
 above as the authoritative one.
 
-### 2.2 The format cost is the real limiter
+### 2.2 The format cost
 
-`initialize()` already exists; formatting is a manual PC step (`tools/flash_probe`, `F`).
-The probe currently formats **255 sectors**, which the firmware accepts because
-`hasMagicNumbers()` only checks the first 133. If you raise the sector count in the
-firmware, **you must raise `FORMAT_SECTORS` in `tools/flash_probe` to match**, or the board
-will boot, fail `hasMagicNumbers()`, and silently fall back to the internal EEPROM.
+Formatting is a manual PC step (`tools/flash_probe`). The probe's `FORMAT_SECTORS` **must**
+match `EmulatedEEPROMMconfig` in `board_teensy41.cpp` (both 768 today). If the firmware count
+is higher than the probe's, the board under-formats, `hasMagicNumbers()` fails, and it
+silently falls back to the internal EEPROM.
 
-At ~45 ms per sector erase (datasheet typical):
+`tools/eeprom_readback` has `SECTORS_TO_CHECK` which must match too.
 
-| Sectors | Format time |
-|---|---|
-| 133 | ~6 s |
-| 265 | ~12 s |
-| 511 | ~23 s |
-| 768 | ~35 s |
+At ~45 ms per sector erase: 768 sectors ≈ **35 s**. Acceptable as an attended PC operation,
+never on the boot path.
 
-This is acceptable as a **manual, attended** PC operation. It is never acceptable on the
-boot path. If you push much past 511, implement lazy/background formatting before going
-further.
+### 2.3 Growing the sector count without losing tune data
+
+Use `tools/flash_probe` key **`K`** ("format but keep a tune"). It writes magic numbers only
+into sectors that do not already have them and leaves every formatted sector untouched.
+
+**Do not use `F` (full format) on a board holding a tune** — it erases all sectors.
+
+This distinction matters and was learned the hard way: an earlier version of `K` decided
+"if any sector lacks magic numbers, rewrite the whole range", on the reasoning that an
+incomplete format means the firmware rejects the chip so there is no tune to lose. That is
+false when *growing* the range — the old lower sectors hold a perfectly good tune. It wiped
+a working tune when going 133 → 768. The current implementation is per-sector and is safe.
 
 ---
 
@@ -158,12 +163,13 @@ the other envs *compiling*; do not constrain behaviour for them.
    `flashEEPROM.length()`. `FLASH_EEPROM_BaseClass::read()`/`write()` clamp silently — an
    overflow looks like working code returning 0xFF.
 
-4. **Widen the addressable range first.** `STORAGE_END` is still `0xFFF` in
-   `storage.cpp:59`, so `MAX_PAGE_ADDRESS` and `STORAGE_SIZE` derive from it. Any block above
-   4095 needs the address space raised deliberately — and note `write()` bounds-checks
-   against `_EEPROM_Emulation_Size` (133 × 31 = **4,123**, highest address `0x101A`), so
-   **there are only 28 spare bytes above the core range right now.** Realistically the first
-   step for any extended table is raising the sector count (see §2.1) and re-formatting.
+4. **Widen the addressable range first.** `STORAGE_END` in `storage.cpp:59` is still `0xFFF`
+   and **must stay there**. The calibration tables are positioned *top-down from it*
+   (`EEPROM_CALIBRATION_CLT_VALUES = STORAGE_END - size`, and each successive table subtracts
+   again), so raising it would relocate every calibration table and silently invalidate
+   existing tunes. The emulated EEPROM is now 23,808 bytes, so `write()` accepts addresses
+   above 4095 — that is the space to use. Do not confuse "more flash" with "raise
+   `STORAGE_END`"; they are separate decisions and only the first one is done.
 
 5. **Re-format after changing geometry.** Bumping sectors invalidates the old format. Three
    places must agree — if they drift you get a board that silently falls back to internal
@@ -347,8 +353,10 @@ rest of the gotchas.
 - [ ] Nothing writes internal EEPROM at runtime.
 - [ ] If you added storage, it is **at `0x1000` or above** and nothing in `0x0000–0x0FFF`
       moved or changed size.
-- [ ] If you changed the sector count, `FORMAT_SECTORS` in `tools/flash_probe` was updated
-      and the chip was re-formatted.
+- [ ] If you changed the sector count, `FORMAT_SECTORS` in `tools/flash_probe` **and**
+      `SECTORS_TO_CHECK` in `tools/eeprom_readback` were updated to match, and the chip was
+      re-formatted with `K` (never `F` on a board holding a tune).
+- [ ] `STORAGE_END` in `storage.cpp` is still `0xFFF` unless a tune-format break was agreed.
 - [ ] New blocks have a version/magic header and their own CRC coverage.
 - [ ] Matching `reference/speeduino.ini` offsets added for anything TunerStudio must see.
 - [ ] No debug scaffolding left behind (`slog*`, extra serial commands, test sketches outside

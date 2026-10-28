@@ -96,17 +96,28 @@ static constexpr uint32_t SPI_FLASH_CLOCK_HZ = 6000000U; // Must match acc_mc338
 static constexpr uint8_t PIN_MC33810_1_CS = 10U;
 static constexpr uint8_t PIN_MC33810_2_CS = 9U;
 
-// 133 sectors * 31 bytes = 4123 bytes of emulated EEPROM. Speeduino only addresses
-// 0..4095 (see STORAGE_END in storage.cpp), so this covers the requirement with the
-// fewest sectors, which matters because initialize() formats every sector on first
-// boot and that cost is linear in the sector count.
+// 768 sectors * 31 bytes = 23808 bytes of emulated EEPROM (addresses 0x0000..0x5CFF).
+//
+// 768 is the hardware ceiling, not a preference: the W25Q32 is 4 MB, the emulation is based
+// at 1 MB, so 3 MB is left and 3 MB / 4 KB = 768 sectors exactly. Going higher runs off the
+// end of the chip.
+//
+// The extra space above 0x0FFF is reserved for custom/large tables. The core Speeduino tune
+// still occupies 0x0000..0x0FFF and that range is a frozen ABI - see AGENTS.md section 2A.
+// Note that STORAGE_END in storage.cpp stays 0xFFF: the calibration tables are positioned
+// top-down from it (EEPROM_CALIBRATION_* are derived by subtracting from STORAGE_END), so
+// raising it would silently relocate them and invalidate every existing tune.
 //
 // NOTE: _ReadWriteBuffer is 128 bytes and holds one whole per-byte slot. Slot size is
 // Flash_Sector_Size/(EEPROM_Bytes_Per_Sector+1) = 4096/32 = 128, so this is exactly at
 // the limit. Do NOT raise EEPROM_Bytes_Per_Sector - that would shrink the slot below
-// what the buffer needs and overflow it.
+// what the buffer needs and overflow it. Grow the sector count instead.
+//
+// Format cost at ~45ms/sector is roughly 35s, done manually from tools/flash_probe ('F').
+// The format routine in that tool must be told the same sector count as this constant.
+//
 // The 1MB base address leaves the start of the chip untouched.
-static EEPROM_Emulation_Config EmulatedEEPROMMconfig{133UL, 4096UL, 31UL, 0x00100000UL};
+static EEPROM_Emulation_Config EmulatedEEPROMMconfig{768UL, 4096UL, 31UL, 0x00100000UL};
 static Flash_SPI_Config SPIconfig{PIN_SPI_FLASH_CS, &SPI};
 static SPI_EEPROM_Class flashEEPROM(EmulatedEEPROMMconfig, SPIconfig);
 
@@ -131,10 +142,10 @@ static void deselectSharedSpiDevices(void)
  *
  * @return true if the flash is detected AND already formatted, so it is safe to use.
  *
- * @note This deliberately does NOT format the chip. Formatting is 133 sector erases
- * (~6s) or, if anything goes wrong, far longer - all of it on the boot path before USB
- * is even set up, so the board never enumerates and appears to reset forever. That is
- * the boot loop this board exhibited.
+ * @note This deliberately does NOT format the chip. Formatting is 768 sector erases
+ * (~35s at ~45ms each) or, if anything goes wrong, far longer - all of it on the boot path
+ * before USB is even set up, so the board never enumerates and appears to reset forever.
+ * That is the boot loop this board exhibited.
  *
  * If the chip is detected but not formatted, we report NotDetected and fall back to the
  * Teensy's internal EEPROM, which is a working board. The chip is then formatted from

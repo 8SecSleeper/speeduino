@@ -31,7 +31,7 @@ static constexpr uint32_t CLOCK_HZ = 6000000UL;
 
 static constexpr uint32_t EEPROM_BASE_ADDR = 0x00100000UL;
 static constexpr uint32_t SECTOR_SIZE      = 4096UL;
-static constexpr uint32_t SECTORS_TO_CHECK = 133UL;  // must match board_teensy41.cpp
+static constexpr uint32_t SECTORS_TO_CHECK = 768UL;  // must match board_teensy41.cpp
 
 static constexpr uint8_t CMD_READ_DATA    = 0x03;
 static constexpr uint8_t CMD_JEDEC_ID     = 0x9F;

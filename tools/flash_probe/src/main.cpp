@@ -310,7 +310,8 @@ static void printHeader()
   Serial.println(F(" W = Write + verify a test pattern to the EEPROM region"));
   Serial.println(F(" E = Erase that sector and confirm it reads 0xFF"));
   Serial.println(F(" T = Time a sector erase (useful for boot-time estimates)"));
-  Serial.println(F(" F = FORMAT for Speeduino (all 255 sectors, magic numbers)"));
+  Serial.println(F(" F = FORMAT for Speeduino (all sectors, magic numbers) - DESTROYS TUNE"));
+  Serial.println(F(" K = FORMAT but KEEP an existing tune (only writes missing sectors)"));
   Serial.println(F(" C = Clear block protect (if writes are being ignored)"));
   Serial.println(F("--------------------------------------------------------------"));
   Serial.println(F(" NOTE: press F before flashing the firmware. It writes the magic"));
@@ -520,8 +521,11 @@ static constexpr uint8_t FORMAT_MAGIC_1 = 0xC0;
 static constexpr uint8_t FORMAT_MAGIC_2 = 0xFF;
 static constexpr uint8_t FORMAT_MAGIC_3 = 0xEE;
 static constexpr uint8_t FORMAT_MAGIC_4 = 204;
-static constexpr uint32_t FORMAT_SECTORS = 255;
-static constexpr uint32_t FORMAT_VERIFY_SECTOR = 132; // must be > 1; never checked before
+// MUST match EmulatedEEPROMMconfig in speeduino/board_teensy41.cpp. If this is lower than
+// the firmware's count, the board under-formats, hasMagicNumbers() fails, and it silently
+// falls back to the internal EEPROM - which looks like "the flash stopped working".
+static constexpr uint32_t FORMAT_SECTORS = 768;   // 768*31 = 23808 bytes = the W25Q32 ceiling
+static constexpr uint32_t FORMAT_VERIFY_SECTOR = 767; // must be > 1; verify the top sector
 
 static void doFormat()
 {
@@ -587,12 +591,103 @@ static void doFormat()
   else    { Serial.println(F("  RESULT: FAILED. Do not flash the firmware yet; report these bytes.")); }
 }
 
+// ---------------------------------------------------------------------------
+// Format while keeping the existing core tune.
+//
+// Extending the sector count does NOT invalidate sectors that are already formatted - only
+// the new ones need magic numbers. So the safe algorithm is:
+//
+//     for each sector: if it already has magic numbers, LEAVE IT ALONE.
+//                      otherwise erase it and write magic numbers.
+//
+// Sectors holding the tune are therefore never touched, which is what makes it safe to grow
+// the EEPROM without a backup.
+//
+// An earlier version of this function scanned the whole range and, if ANY sector was
+// missing magic, reformatted EVERYTHING. That destroyed a working tune when growing from
+// 133 to 768 sectors, because 635 sectors were legitimately missing. Do not reintroduce a
+// whole-range decision here.
+//
+// Note it is still not possible to "re-stamp" a specific sector in place: sector N's magic
+// number word lives at N*4096+0, inside sector N itself, so erasing to make room destroys
+// the very marker being written. But that only matters for sectors that are genuinely
+// unformatted, where there is nothing to preserve.
+// ---------------------------------------------------------------------------
+static bool readMagicAt(uint32_t addr, uint8_t out[4])
+{
+  csLow();
+  xfer(CMD_READ_DATA);
+  sendAddr(addr);
+  for (uint8_t i = 0; i < 4; i++) { out[i] = xfer(0xFF); }
+  csHigh();
+  return (out[0] == FORMAT_MAGIC_1) && (out[1] == FORMAT_MAGIC_2) &&
+         (out[2] == FORMAT_MAGIC_3) && (out[3] == FORMAT_MAGIC_4);
+}
+
+static void doFormatKeepData()
+{
+  Serial.println(F("\r\n-- Format for Speeduino (KEEP EXISTING TUNE) --"));
+  Serial.println(F("  Only sectors WITHOUT magic numbers are written. Formatted"));
+  Serial.println(F("  sectors (which hold the tune) are left completely untouched."));
+  Serial.printf("  Range: %lu sectors at 0x%06lX..0x%06lX\r\n",
+                (unsigned long)FORMAT_SECTORS,
+                (unsigned long)EEPROM_BASE_ADDR,
+                (unsigned long)(EEPROM_BASE_ADDR + (FORMAT_SECTORS - 1) * SECTOR_SIZE));
+
+  ProbeResult r = probe(PIN_CS);
+  if (!r.responded) { Serial.println(F("  Aborting: no chip responded.")); return; }
+  if (!destructiveOpsAllowed(r)) { return; }
+
+  Serial.println(F("  Scanning..."));
+  uint32_t have = 0;
+  uint32_t written = 0;
+  uint32_t failures = 0;
+  const uint8_t magic[4] = { FORMAT_MAGIC_1, FORMAT_MAGIC_2, FORMAT_MAGIC_3, FORMAT_MAGIC_4 };
+  uint8_t buf[4];
+  uint32_t t0 = millis();
+
+  for (uint32_t sector = 0; sector < FORMAT_SECTORS; sector++)
+  {
+    uint32_t addr = EEPROM_BASE_ADDR + (sector * SECTOR_SIZE);
+
+    if (readMagicAt(addr, buf))
+    {
+      have++;              // already formatted - tune may live here, do not touch
+      continue;
+    }
+
+    eraseSector(addr);
+    if (!waitReady(5000)) { failures++; continue; }
+    programPage(addr, magic, sizeof(magic));
+    if (!waitReady(5000)) { failures++; continue; }
+    written++;
+
+    if ((written % 100U) == 0U)
+    {
+      Serial.printf("  ... %lu written so far (at sector %lu)\r\n",
+                    (unsigned long)written, (unsigned long)sector);
+    }
+  }
+
+  Serial.printf("  done in %lu ms\r\n", (unsigned long)(millis() - t0));
+  Serial.printf("  %lu sectors were already formatted (untouched), %lu written, %lu failure(s)\r\n",
+                (unsigned long)have, (unsigned long)written, (unsigned long)failures);
+  if ((written == 0U) && (failures == 0U))
+  {
+    Serial.println(F("  RESULT: nothing to do - range was already fully formatted."));
+  }
+  else
+  {
+    Serial.println(F("  RESULT: range now covers all sectors. Existing data preserved."));
+  }
+}
+
 static void doTiming()
 {
   Serial.println(F("\r\n-- Sector erase timing --"));
   Serial.println(F("  Measuring worst-case blocking time for one 4KB erase."));
-  Serial.println(F("  Speeduino formats ALL sectors on first boot, so multiply by your"));
-  Serial.println(F("  sector count (255 in the current config).\r\n"));
+  Serial.println(F("  Speeduino formats ALL sectors on first boot, so multiply by the"));
+  Serial.printf("  sector count (%lu in the current config).\r\n", (unsigned long)FORMAT_SECTORS);
 
   uint32_t total = 0;
   for (uint8_t i = 0; i < 3; i++)
@@ -606,7 +701,7 @@ static void doTiming()
   }
   uint32_t avg = total / 3;
   Serial.printf("  average: %lu us\r\n", (unsigned long)avg);
-  Serial.printf("  estimate for 255 sectors: %lu ms\r\n", (unsigned long)((avg * 255UL) / 1000UL));
+  Serial.printf("  estimate for %lu sectors: %lu ms\r\n", (unsigned long)FORMAT_SECTORS, (unsigned long)((avg * FORMAT_SECTORS) / 1000UL));
 }
 
 // ---------------------------------------------------------------------------
@@ -654,9 +749,10 @@ void loop()
     case 'E': doErase();     break;
     case 'T': doTiming();    break;
     case 'F': doFormat();    break;
+    case 'K': doFormatKeepData(); break;
     case 'C': doClearProtect(); break;
     default:
-      Serial.println(F("  Unknown key. R/A/P/S/D/W/E/T/F/C."));
+      Serial.println(F("  Unknown key. R/A/P/S/D/W/E/T/F/K/C."));
       break;
   }
   Serial.println(F("\r\n Press a key from the menu."));
