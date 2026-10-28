@@ -262,6 +262,14 @@ static constexpr uint32_t FLASH_ERASE_TIMEOUT_MS = 1000U; // 4KB sector erase (4
 // falls back to the internal EEPROM, which is better than a board that never starts.
 static constexpr uint32_t FLASH_FORMAT_BUDGET_MS = 2000U;
 
+// How long to wait after issuing a program/erase command before the first BUSY poll.
+// The W25Q does not raise BUSY the instant CS rises and still reports idle for a short
+// time after the command byte stream. Polling inside that window returns "ready" while
+// the operation is really in flight, so the next command is issued into a busy chip and
+// is silently discarded. The old value (0, i.e. no settle) is what made writes vanish.
+// 50us is what tools/flash_probe uses and is proven on this exact hardware.
+static constexpr uint32_t FLASH_SETTLE_US = 50U;
+
 // Set when a format attempt had to be abandoned, so nothing retries it.
 static bool formatBudgetExceeded = false;
 
@@ -338,18 +346,29 @@ int8_t SPI_EEPROM_Class::readFlashBytes(uint32_t address, byte *buf, uint32_t le
 }
 
 int8_t SPI_EEPROM_Class::writeFlashBytes(uint32_t address, byte *buf, uint32_t length){
+  // Make sure no earlier operation is still running, otherwise the WREN below is issued
+  // into a busy chip and silently discarded - then the program command has no write
+  // enable latch set and is ignored too. This is the failure that made burns look
+  // successful while every byte still read 0xFF.
+  if(!winbondSPIFlash.waitWhileBusy(FLASH_BUSY_TIMEOUT_MS)){ return -1; }
+
   winbondSPIFlash.setWriteEnable(true);
   winbondSPIFlash.writePage(address+_config.EEPROM_Flash_BaseAddress, buf, length);
-  (void)winbondSPIFlash.waitWhileBusy(FLASH_BUSY_TIMEOUT_MS);
+  (void)winbondSPIFlash.waitWhileBusy(FLASH_BUSY_TIMEOUT_MS, FLASH_SETTLE_US);
   return 0;
 }
 
 int8_t SPI_EEPROM_Class::eraseFlashSector(uint32_t address, uint32_t length){
+  // Same reasoning as writeFlashBytes(): let any previous operation finish, and give the
+  // chip time to actually assert BUSY before polling, or this returns "not busy" while
+  // the ~45ms erase is still running and the next command is dropped.
+  if(!winbondSPIFlash.waitWhileBusy(FLASH_ERASE_TIMEOUT_MS)){ return -1; }
+
   winbondSPIFlash.setWriteEnable(true);
   winbondSPIFlash.eraseSector(address+_config.EEPROM_Flash_BaseAddress);
   // A 4KB sector erase is typically ~45ms but can be up to 400ms per the datasheet,
   // so allow generous headroom here rather than failing a legitimate erase.
-  (void)winbondSPIFlash.waitWhileBusy(FLASH_ERASE_TIMEOUT_MS);
+  (void)winbondSPIFlash.waitWhileBusy(FLASH_ERASE_TIMEOUT_MS, FLASH_SETTLE_US);
   return 0;
 }
 

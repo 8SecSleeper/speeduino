@@ -185,16 +185,52 @@ static bool initialiseFlashEEPROM(void)
   return currentStatus.storageBackend == statuses::StorageBackend::ExternalFlash;
 }
 
+#if defined(USE_SPI_EEPROM)
+/** @brief Take the MC33810 chip selects off the shared SPI bus.
+ *
+ * This is the fix for "reads work at boot then the burn hangs forever".
+ *
+ * The two MC33810 injector/ignition drivers (U7/U8) sit on the same LPSPI4 bus as the
+ * flash. acc_mc33810.cpp drives their chip selects from an RAII guard that leaves the pins
+ * LOW when the chip is idle:
+ *
+ *     mc33810_active_guard_t(m) : _m(m) { _m.pin.setPinHigh(); }  // ACTIVE
+ *     ~mc33810_active_guard_t()         { _m.pin.setPinLow();  }  // INACTIVE
+ *
+ * i.e. "inactive" is driven LOW. With both drivers holding their selects low they stay on
+ * the bus and drive MISO, so the flash can never answer: every access reads back 0xFF for
+ * the status register and all-ones for data.
+ *
+ * Measured on hardware by driving the two selects and probing the flash:
+ *   CS high (as at boot)  -> SR1=0x00, magic numbers read back correctly
+ *   CS low  (after init)  -> SR1=0xFF, data all zeros      <- the failure
+ *   CS high again         -> SR1=0x00, recovered
+ *
+ * During boot this did not show up because initMC33810() runs later in the init sequence
+ * than the tune is loaded. That is why the board boots fine and only fails on a burn.
+ */
+static inline void parkSharedSpiDevices(void)
+{
+  // Cheapest possible form - these are already configured as outputs by
+  // deselectSharedSpiDevices()/initMC33810(), so this is two port writes with no pinMode
+  // overhead, which matters because this runs around every single flash access.
+  digitalWriteFast(PIN_MC33810_1_CS, HIGH);
+  digitalWriteFast(PIN_MC33810_2_CS, HIGH);
+}
+#endif
+
 // storage_api_t adapters for the emulated EEPROM held in the external SPI flash.
 // These mirror the shape of board_eeprom_adapter.hpp, but bind to flashEEPROM
 // rather than the Teensy's internal EEPROM object.
 static byte readFlashEeprom(uint16_t address)
 {
+  parkSharedSpiDevices();
   return flashEEPROM.read(address);
 }
 
 static void writeFlashEeprom(uint16_t address, byte val)
 {
+  parkSharedSpiDevices();
   (void)flashEEPROM.write(address, val);
 }
 
@@ -607,18 +643,23 @@ static uint16_t getEepromWriteBlockSize(const statuses &current)
 {
 #if defined(USE_SPI_EEPROM)
   // Each written byte costs a WRITE_ENABLE + PAGE_PROGRAM + busy-wait poll, and a
-  // W25Q page program is ~0.7ms typical / ~3ms worst case. So the number of writes per
-  // main-loop pass directly controls how long the loop is blocked, and therefore how
-  // long the comms handler goes unserviced.
+  // W25Q page program is ~0.7ms typical / ~3ms worst case.
   //
-  // 20 (the previous value) allowed 160 writes per pass with the engine stopped, i.e.
-  // up to ~480ms of blocking. TunerStudio's serial timeout is around 1-2s, so burning a
-  // blank tune - thousands of changed bytes across every page - stalled long enough that
-  // TS timed out and aborted mid-burn, leaving the tune unwritten.
+  // IMPORTANT: this value is load-bearing for TunerStudio's burn protocol.
+  // storage.cpp does `setEepromWritePending(writesRemaining==0U)` at the end of
+  // savePage(), so if the budget is exhausted the page is marked as still pending and
+  // the write is deferred to the main loop's saveAllPages() retry. That retry only runs
+  // when storageWriteTimeoutExpired() is true, i.e. ~1 second later.
   //
-  // 6 keeps a worst-case pass to ~108ms, comfortably inside the timeout. Burning takes
-  // proportionally more passes, but the tune actually completes.
-  uint16_t maxWrite = 6;
+  // So a budget that is too low doesn't just slow the burn down, it makes every page
+  // write take a second to resume, and TS's per-page 'b' command never gets a completed
+  // burn - data silently never lands. This must be high enough that a config page
+  // (roughly 64-128 bytes) completes in a single savePage() call.
+  //
+  // 160 (20*8 with RPM==0) matches what the working STM32 SPI-flash boards use. The
+  // earlier comms drop was a *different* problem - see the MC33810/transaction notes -
+  // not this budget.
+  uint16_t maxWrite = 20;
 #else
   uint16_t maxWrite = 64;
 #endif

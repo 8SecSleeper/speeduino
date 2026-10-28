@@ -74,9 +74,14 @@ public:
    * firmware mid-boot.
    *
    * @param timeoutMs Maximum time to wait
+   * @param settleUs Time to wait BEFORE the first status poll. The chip does not raise
+   *        BUSY the instant CS rises; for a short while after a program/erase command it
+   *        still reports idle. Polling immediately therefore reads a stale "not busy" and
+   *        returns while the operation is really in flight - the next command is then
+   *        silently dropped. Always pass a settle value after starting an operation.
    * @return true if the chip became ready, false on timeout
    */
-  bool waitWhileBusy(uint32_t timeoutMs);
+  bool waitWhileBusy(uint32_t timeoutMs, uint32_t settleUs = 0U);
   
   uint8_t  readManufacturer();
   uint16_t readPartID();

@@ -39,6 +39,12 @@
 
 #define DEFAULT_TIMEOUT 200
 
+// Upper bound on how long read() will wait for an in-flight program/erase to finish
+// before giving up. Only reached if the chip is genuinely busy, so this is just a
+// safety net - it must stay well below the point where a hung chip would stall the
+// firmware for seconds.
+static constexpr uint32_t WINBOND_READ_TIMEOUT_MS = 50U;
+
 typedef struct {
     winbondFlashClass::partNumber pn;
     uint16_t id;
@@ -177,8 +183,20 @@ bool winbondFlashClass::busy()
   return false;
 }
 
-bool winbondFlashClass::waitWhileBusy(uint32_t timeoutMs)
+bool winbondFlashClass::waitWhileBusy(uint32_t timeoutMs, uint32_t settleUs)
 {
+  // Give the chip time to actually start the operation before trusting its status.
+  // Without this a page program (~0.7ms) or sector erase (~45ms) is never observed as
+  // busy at all: the first poll still reads the pre-command "idle" state, this function
+  // returns immediately, and the caller fires the next command into a busy chip which
+  // ignores it. That silently dropped the second of the two writes FLASH_EEPROM_BaseClass
+  // ::write() issues per byte (the address-translation update), so values reached flash
+  // but were never committed - a burn looked like it worked while every byte read 0xFF.
+  if (settleUs > 0U)
+  {
+    delayMicroseconds(settleUs);
+  }
+
   const uint32_t start = millis();
   while (busy())
   {
@@ -266,8 +284,16 @@ void winbondFlashClass::end()
 
 uint16_t winbondFlashClass::read (uint32_t addr,uint8_t *buf,uint16_t n)
 {
+  // Used to be `if(busy()) return 0;`, which silently reported "zero bytes read" and
+  // left the caller's buffer untouched - indistinguishable from reading stale data.
+  // Wait the in-flight operation out instead, with the same bound as every other wait.
   if(busy())
-    return 0;
+  {
+    if(!waitWhileBusy(WINBOND_READ_TIMEOUT_MS))
+    {
+      return 0;
+    }
+  }
   
   select();
   transfer(READ);
