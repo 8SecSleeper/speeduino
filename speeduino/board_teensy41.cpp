@@ -39,18 +39,24 @@ static uint8_t bootTraceIndex = 0;
 /** @brief Clear the trace. Call first, so stale markers are not mistaken for progress. */
 static void bootTraceReset(void)
 {
+#if defined(BOOT_TRACE_ENABLED)
   bootTraceIndex = 0;
   for (uint16_t i = 0; i < BOOT_TRACE_LEN; i++) { EEPROM.update(BOOT_TRACE_BASE + i, 0xFF); }
+#endif
 }
 
 /** @brief Record progress. Markers are small codes, see boot_trace sketch for the list. */
 static void bootTrace(uint8_t marker)
 {
+#if defined(BOOT_TRACE_ENABLED)
   if (bootTraceIndex < BOOT_TRACE_LEN)
   {
     EEPROM.update(BOOT_TRACE_BASE + bootTraceIndex, marker);
     ++bootTraceIndex;
   }
+#else
+  UNUSED(marker);
+#endif
 }
 
 /** @brief Public wrapper so init.cpp can drop markers along the shared boot path. */
@@ -600,10 +606,19 @@ void boardInitPins(uint8_t, pinNumbers_t &pins)
 static uint16_t getEepromWriteBlockSize(const statuses &current)
 {
 #if defined(USE_SPI_EEPROM)
-  // For use with the onboard Winbond SPI flash. Writes are page-programmed, and only
-  // an occasional sector erase + rewrite occurs, so the block size can be lower than
-  // for the internal EEPROM but should stay modest to avoid long bus stalls.
-  uint16_t maxWrite = 20;
+  // Each written byte costs a WRITE_ENABLE + PAGE_PROGRAM + busy-wait poll, and a
+  // W25Q page program is ~0.7ms typical / ~3ms worst case. So the number of writes per
+  // main-loop pass directly controls how long the loop is blocked, and therefore how
+  // long the comms handler goes unserviced.
+  //
+  // 20 (the previous value) allowed 160 writes per pass with the engine stopped, i.e.
+  // up to ~480ms of blocking. TunerStudio's serial timeout is around 1-2s, so burning a
+  // blank tune - thousands of changed bytes across every page - stalled long enough that
+  // TS timed out and aborted mid-burn, leaving the tune unwritten.
+  //
+  // 6 keeps a worst-case pass to ~108ms, comfortably inside the timeout. Burning takes
+  // proportionally more passes, but the tune actually completes.
+  uint16_t maxWrite = 6;
 #else
   uint16_t maxWrite = 64;
 #endif
