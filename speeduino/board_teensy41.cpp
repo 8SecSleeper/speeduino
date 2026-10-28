@@ -546,6 +546,20 @@ bool pinIsSerial(uint8_t pin)
 
 static void setPinHysteresis(uint8_t pin)
 {
+  // Must reject invalid pins. digital_pin_to_info_PGM + pin is unchecked pointer
+  // arithmetic, so NOT_A_PIN (255) or any pin beyond the table would index far outside
+  // it and the writes below would corrupt memory or hard fault.
+  //
+  // This is not theoretical: a decoder that does not use the secondary/tertiary trigger
+  // makes buildDecoder() set pinTrigger2/pinTrigger3 to NOT_A_PIN, and on a blank tune
+  // (missing-tooth decoder) those paths are reached. With interrupts already disabled at
+  // that point, the resulting fault resets the CPU before USB enumerates - which is the
+  // boot loop that a freshly formatted external EEPROM produced.
+  if (pin >= CORE_NUM_DIGITAL)
+  {
+    return;
+  }
+
   //Refer to digital.c in the Teensyduino core for the following code
   //Refer also to Pgs 382 and 950 of the iMXRT1060 Reference Manual
   const struct digital_pin_bitband_and_config_table_struct *p;

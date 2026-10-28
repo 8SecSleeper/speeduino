@@ -167,6 +167,9 @@ void initialiseAll(void)
 
     pPrimarySerial = &Serial; //Default to standard Serial interface
     currentStatus.allowLegacyComms = true; //Flag legacy comms as being allowed on startup
+#if defined(CORE_TEENSY) && defined(USE_SPI_EEPROM)
+    boardBootTrace(0x40); // SD/RTC phase done
+#endif
 
     //Set the pin mappings
     if((configPage2.pinMapping == 255) || (configPage2.pinMapping == 0)) //255 = EEPROM value in a blank AVR; 0 = EEPROM value in new FRAM
@@ -181,12 +184,21 @@ void initialiseAll(void)
       configPage2.pinMapping = (boardDefaultMapping != 0U) ? boardDefaultMapping : 3U;
     }
     setPinMapping(configPage2.pinMapping);
+#if defined(CORE_TEENSY) && defined(USE_SPI_EEPROM)
+    boardBootTrace(0x41); // pin mapping applied
+    // Record the mapping that actually got used, so the reader shows whether the
+    // DropBear mapping (55) was selected or the generic fallback (3) was taken.
+    boardBootTrace(configPage2.pinMapping);
+#endif
 
     // Repeatedly initialising the CAN bus hangs the system when
     // running initialisation tests on Teensy 3.5
     #if defined(NATIVE_CAN_AVAILABLE) && !defined(UNIT_TEST)
       initCAN();
     #endif
+#if defined(CORE_TEENSY) && defined(USE_SPI_EEPROM)
+    boardBootTrace(0x42); // initCAN() done
+#endif
 
     //Must come after setPinMapping() as secondary serial can be changed on a per board basis
     if (configPage9.enable_secondarySerial == 1) { secondarySerial.begin(115200); }
@@ -209,6 +221,9 @@ void initialiseAll(void)
     initialiseFlexSensor(configPage2, currentStatus, pinNumbers.pinFlex);
     initialiseLaunchControl(currentStatus, configPage6, pinNumbers);
     initialiseIgnBypass(currentStatus, configPage4, pinNumbers);
+#if defined(CORE_TEENSY) && defined(USE_SPI_EEPROM)
+    boardBootTrace(0x43); // aux controllers initialised
+#endif
 
     //Same as above, but for the VSS input
     if (isExternalVssMode(configPage2)) // VSS modes 2 and 3 are interrupt drive (Mode 1 is CAN)
@@ -229,6 +244,9 @@ void initialiseAll(void)
     }
 
     //Once the configs have been loaded, a number of one time calculations can be completed
+#if defined(CORE_TEENSY) && defined(USE_SPI_EEPROM)
+    boardBootTrace(0x46); // trigger/knock interrupt section done
+#endif
 
     if (configPage4.trigPatternSec == SEC_TRIGGER_POLL && configPage4.TrigPattern == DECODER_MISSING_TOOTH)
     { configPage4.TrigEdgeSec = configPage4.PollLevelPolarity; } // set the secondary trigger edge automatically to correct working value with poll level mode to enable cam angle detection in closed loop vvt.
@@ -249,11 +267,26 @@ void initialiseAll(void)
     toothHistoryIndex = 0;
     
     noInterrupts();
+#if defined(CORE_TEENSY) && defined(USE_SPI_EEPROM)
+    boardBootTrace(0x49); // interrupts disabled
+#endif
     currentStatus.decoder = buildDecoder(configPage4.TrigPattern);
+#if defined(CORE_TEENSY) && defined(USE_SPI_EEPROM)
+    boardBootTrace(0x4A); // buildDecoder done
+#endif
     boardInitPins(configPage2.pinMapping, pinNumbers);
+#if defined(CORE_TEENSY) && defined(USE_SPI_EEPROM)
+    boardBootTrace(0x4B); // boardInitPins done
+#endif
     // The schedulers are all configured & pins are mapped - so start the schedulers
     startIgnitionSchedulers();
+#if defined(CORE_TEENSY) && defined(USE_SPI_EEPROM)
+    boardBootTrace(0x4C); // startIgnitionSchedulers done
+#endif
     startFuelSchedulers();
+#if defined(CORE_TEENSY) && defined(USE_SPI_EEPROM)
+    boardBootTrace(0x4D); // startFuelSchedulers done
+#endif
     
     //The secondary input can be used for VSS if nothing else requires it. Allows for the standard VR conditioner to be used for VSS. This MUST be run after the initialiseTriggers() function
     if( VSS_USES_RPM2() ) { attachInterrupt(digitalPinToInterrupt(pinNumbers.pinVSS), vssPulse, RISING); } //Secondary trigger input can safely be used for VSS
@@ -261,13 +294,27 @@ void initialiseAll(void)
 
      
     initialiseFuelPump(currentStatus, configPage2, pinNumbers);
-
+#if defined(CORE_TEENSY) && defined(USE_SPI_EEPROM)
+    boardBootTrace(0x4E); // VSS/FLEX attach + fuel pump done
+#endif
     interrupts();
+#if defined(CORE_TEENSY) && defined(USE_SPI_EEPROM)
+    boardBootTrace(0x47); // decoder + schedulers + fuel pump started
+#endif
     initialiseCLT();
     initialiseTPS();
+#if defined(CORE_TEENSY) && defined(USE_SPI_EEPROM)
+    boardBootTrace(0x48); // CLT + TPS sampled
+#endif
     initialiseTachoControl(pinNumbers.pinTachOut, configPage2, configPage6, currentStatus);
+#if defined(CORE_TEENSY) && defined(USE_SPI_EEPROM)
+    boardBootTrace(0x44); // sensors + tacho done
+#endif
 
     currentStatus.initialisationComplete = true;
+#if defined(CORE_TEENSY) && defined(USE_SPI_EEPROM)
+    boardBootTrace(0x45); // INITIALISATION COMPLETE
+#endif
     digitalWrite(LED_BUILTIN, HIGH);
 }
 

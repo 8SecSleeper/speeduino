@@ -60,6 +60,21 @@ static const char *describe(uint8_t v)
     case 0x34: return "doUpdates() done";
     case 0x35: return "initBoard() done";
     case 0x36: return "timers done";
+    case 0x40: return "SD/RTC phase done";
+    case 0x41: return "PIN MAPPING APPLIED";
+    case 0x42: return "initCAN() done";
+    case 0x43: return "aux controllers initialised";
+    case 0x44: return "sensors + tacho done";
+    case 0x45: return "INITIALISATION COMPLETE";
+    case 0x46: return "trigger/knock interrupt section done";
+    case 0x47: return "decoder + schedulers + fuel pump started";
+    case 0x48: return "CLT + TPS sampled";
+    case 0x49: return "interrupts DISABLED";
+    case 0x4A: return "buildDecoder() done";
+    case 0x4B: return "boardInitPins() done";
+    case 0x4C: return "startIgnitionSchedulers() done";
+    case 0x4D: return "startFuelSchedulers() done";
+    case 0x4E: return "VSS/FLEX attach + fuel pump done";
     default:   return "?";
   }
 }
