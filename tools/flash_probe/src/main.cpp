@@ -56,6 +56,8 @@ static constexpr uint32_t SECTOR_SIZE      = 4096UL;
 // ---------------------------------------------------------------------------
 static constexpr uint8_t CMD_WRITE_ENABLE  = 0x06;
 static constexpr uint8_t CMD_READ_STATUS1  = 0x05;
+static constexpr uint8_t CMD_READ_STATUS2  = 0x35;
+static constexpr uint8_t CMD_WRITE_STATUS1 = 0x01;
 static constexpr uint8_t CMD_READ_DATA     = 0x03;
 static constexpr uint8_t CMD_PAGE_PROGRAM  = 0x02;
 static constexpr uint8_t CMD_SECTOR_ERASE  = 0x20;
@@ -83,6 +85,9 @@ static const JedecInfo JEDEC_TABLE[] = {
 static void csLow()  { digitalWriteFast(PIN_CS, LOW);  }
 static void csHigh() { digitalWriteFast(PIN_CS, HIGH); }
 
+// Forward declared: clearBlockProtect() is defined before writeEnable()
+static void writeEnable();
+
 static uint8_t xfer(uint8_t v) { return SPI.transfer(v); }
 
 static void sendAddr(uint32_t addr)
@@ -104,12 +109,37 @@ static uint8_t readStatus1()
 static bool waitReady(uint32_t timeoutMs = 3000)
 {
   uint32_t start = millis();
+  // Always allow at least a short settle: a command issued immediately after CS goes
+  // high can still read a stale "not busy" status before the chip has started the
+  // operation, which makes fast erases look instantaneous.
+  delayMicroseconds(50);
   while ((readStatus1() & SR1_BUSY) != 0U)
   {
     if (millis() - start > timeoutMs) { return false; }
     delay(1);
   }
   return true;
+}
+
+/** @brief Read status register 2 */
+static uint8_t readStatus2()
+{
+  csLow();
+  xfer(CMD_READ_STATUS2);
+  uint8_t v = xfer(0xFF);
+  csHigh();
+  return v;
+}
+
+/** @brief Clear the block-protect bits in status register 1 */
+static bool clearBlockProtect()
+{
+  writeEnable();
+  csLow();
+  xfer(CMD_WRITE_STATUS1);
+  xfer(0x00);   // SRP0=0, BP2..0=000, TB=0, SEC=0 -> nothing protected
+  csHigh();
+  return waitReady(500);
 }
 
 static void writeEnable()
@@ -251,6 +281,7 @@ static void printHeader()
   Serial.println(F(" E = Erase that sector and confirm it reads 0xFF"));
   Serial.println(F(" T = Time a sector erase (useful for boot-time estimates)"));
   Serial.println(F(" F = FORMAT for Speeduino (all 255 sectors, magic numbers)"));
+  Serial.println(F(" C = Clear block protect (if writes are being ignored)"));
   Serial.println(F("--------------------------------------------------------------"));
   Serial.println(F(" NOTE: press F before flashing the firmware. It writes the magic"));
   Serial.println(F(" numbers so the firmware skips its own slow first-boot format."));
@@ -312,14 +343,65 @@ static void doSweep()
 
 static void doStatus()
 {
-  Serial.println(F("\r\n-- Status register 1 --"));
-  uint8_t sr = readStatus1();
-  Serial.printf("  0x%02X  busy=%u  WEL=%u\r\n", sr, (sr & SR1_BUSY) ? 1 : 0, (sr & SR1_WEL) ? 1 : 0);
-  if (sr == 0xFF)
+  Serial.println(F("\r\n-- Status registers --"));
+  uint8_t sr1 = readStatus1();
+  uint8_t sr2 = readStatus2();
+  Serial.printf("  SR1 = 0x%02X  busy=%u WEL=%u BP=%u%u%u TB=%u SEC=%u SRP0=%u\r\n",
+                sr1,
+                (sr1 & 0x01) ? 1 : 0,
+                (sr1 & 0x02) ? 1 : 0,
+                (sr1 & 0x20) ? 1 : 0, (sr1 & 0x10) ? 1 : 0, (sr1 & 0x08) ? 1 : 0,
+                (sr1 & 0x40) ? 1 : 0,
+                (sr1 & 0x80) ? 1 : 0,
+                (sr1 & 0x80) ? 1 : 0);
+  Serial.printf("  SR2 = 0x%02X  SRP1=%u QE=%u WPS=%u CMP=%u SUS=%u\r\n",
+                sr2,
+                (sr2 & 0x01) ? 1 : 0,
+                (sr2 & 0x02) ? 1 : 0,
+                (sr2 & 0x04) ? 1 : 0,
+                (sr2 & 0x40) ? 1 : 0,
+                (sr2 & 0x80) ? 1 : 0);
+
+  uint8_t bp = (sr1 >> 2) & 0x07;
+  if (bp != 0u)
   {
-    Serial.println(F("  0xFF means MISO is idle-high with nothing driving it."));
-    Serial.println(F("  That usually means no chip selected on this CS pin."));
+    Serial.printf("  WARNING: BP bits = %u%u%u, so part of the chip is BLOCK PROTECTED.\r\n",
+                  (bp >> 2) & 1, (bp >> 1) & 1, bp & 1);
+    Serial.println(F("  Protected regions silently ignore erase and program commands."));
   }
+  else
+  {
+    Serial.println(F("  No block protection set."));
+  }
+  if (sr1 == 0xFF || sr1 == 0x00)
+  {
+    Serial.println(F("  Suspicious: SR1 is all-ones/all-zeros, MISO may be floating."));
+  }
+
+  Serial.println(F("\r\n-- Write-enable latch test --"));
+  uint8_t before = readStatus1();
+  writeEnable();
+  delayMicroseconds(50);
+  uint8_t after = readStatus1();
+  Serial.printf("  WEL before WREN = %u, after WREN = %u -> %s\r\n",
+                (before & 0x02) ? 1 : 0, (after & 0x02) ? 1 : 0,
+                (after & 0x02) ? "write enable WORKS" : "write enable FAILED (chip is protected)");
+}
+
+static void doClearProtect()
+{
+  Serial.println(F("\r\n-- Clear block protect --"));
+  Serial.println(F("  NOTE: if SR1 bit7 (SRP0) was already set, the protection is"));
+  Serial.println(F("  permanent until the board is POWER CYCLED. If this reports"));
+  Serial.println(F("  failure, power cycle and try again."));
+
+  uint8_t before = readStatus1();
+  Serial.printf("  SR1 before = 0x%02X\r\n", before);
+  if (!clearBlockProtect()) { Serial.println(F("  write status TIMEOUT")); return; }
+  uint8_t after = readStatus1();
+  Serial.printf("  SR1 after  = 0x%02X\r\n", after);
+  if (((after >> 2) & 0x07) == 0u) { Serial.println(F("  Block protect is now clear.")); }
+  else { Serial.println(F("  Still protected. Power cycle the board and retry.")); }
 }
 
 static void doDump()
@@ -408,6 +490,7 @@ static constexpr uint8_t FORMAT_MAGIC_2 = 0xFF;
 static constexpr uint8_t FORMAT_MAGIC_3 = 0xEE;
 static constexpr uint8_t FORMAT_MAGIC_4 = 204;
 static constexpr uint32_t FORMAT_SECTORS = 255;
+static constexpr uint32_t FORMAT_VERIFY_SECTOR = 132; // must be > 1; never checked before
 
 static void doFormat()
 {
@@ -445,10 +528,12 @@ static void doFormat()
   Serial.printf("  done in %lu ms, %lu failure(s)\r\n",
                 (unsigned long)elapsed, (unsigned long)failures);
 
-  // Verify the first and last sectors read back correctly
+  // Verify a HIGH sector that the firmware never touched, so "OK" proves this tool
+  // actually wrote, rather than merely reading back data that was already there.
   Serial.println(F("  verifying..."));
   bool ok = true;
-  for (uint32_t sector : { (uint32_t)0, FORMAT_SECTORS - 1 })
+  const uint32_t verifyList[3] = { 0u, FORMAT_VERIFY_SECTOR, FORMAT_SECTORS - 1u };
+  for (uint32_t sector : verifyList)
   {
     uint32_t addr = EEPROM_BASE_ADDR + (sector * SECTOR_SIZE);
     uint8_t buf[4];
@@ -537,8 +622,9 @@ void loop()
     case 'E': doErase();     break;
     case 'T': doTiming();    break;
     case 'F': doFormat();    break;
+    case 'C': doClearProtect(); break;
     default:
-      Serial.println(F("  Unknown key. R/A/P/S/D/W/E/T/F."));
+      Serial.println(F("  Unknown key. R/A/P/S/D/W/E/T/F/C."));
       break;
   }
   Serial.println(F("\r\n Press a key from the menu."));
