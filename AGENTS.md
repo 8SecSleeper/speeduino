@@ -38,7 +38,9 @@ emulated EEPROM. **This is a permanent decision, not a temporary workaround.**
 
 - Bytes 0..4095 of the emulated EEPROM are the tune (`STORAGE_END = 0xFFF`).
 - Geometry: `EEPROM_Emulation_Config{133, 4096, 31, 0x00100000}` — 133 sectors, 4 KB each,
-  31 bytes/sector, based at **1 MB** into the chip.
+  31 bytes/sector, based at **1 MB** into the chip. That yields 4,123 emulated bytes, i.e.
+  only 28 bytes more than the core range — it is sized to the core tune, not to spare
+  capacity. See §2.1 before planning anything larger.
 - Exposed as a `storage_api_t` from `getBoardStorageApi()` in `board_teensy41.cpp`.
 
 **Never revert to the Teensy's internal emulated EEPROM as the primary store.** It is only
@@ -46,9 +48,158 @@ emulated EEPROM. **This is a permanent decision, not a temporary workaround.**
 the board still boots. That fallback must stay — but the SPI flash is the intended home for
 tune data, and new features should assume its capacity.
 
-Do **not** change the emulation geometry. `_ReadWriteBuffer` is exactly 128 bytes and the
-per-byte slot is exactly `4096/(31+1) = 128`; raising `EEPROM_Bytes_Per_Sector` overflows
-that buffer. If more capacity is needed, read `docs/future-eeprom-capacity.md` first.
+**Geometry rules:**
+
+- `EEPROM_Bytes_Per_Sector` **must stay 31**. The per-byte slot is exactly
+  `4096/(31+1) = 128`, which is the size of `_ReadWriteBuffer`. Raising it overflows that
+  buffer.
+- To gain capacity, raise the **sector count** — that is the sanctioned mechanism (see §2.1
+  and `docs/future-eeprom-capacity.md`).
+
+### 2.1 Capacity is a fixed physical fact — check it before promising anything
+
+The W25Q32 is **4 MB**. The emulation base is **1 MB** (`0x00100000`), which leaves
+**3 MB** usable. Per sector is 4 KB, and `EEPROM_Bytes_Per_Sector` must stay at **31**
+(because the per-byte slot is exactly `4096/(31+1) = 128`, the size of `_ReadWriteBuffer`).
+
+| Sectors | Emulated bytes | Highest address | Physical end | Verdict |
+|---|---|---|---|---|
+| 133 (current) | 4,123 | `0x101A` | `0x00185000` | fits |
+| 265 | 8,215 | `0x2016` | `0x00209000` | fits |
+| 511 | 15,841 | `0x3DE0` | `0x002FF000` | fits |
+| **768** | **23,808** | `0x5CFF` | `0x00400000` | **hard ceiling** |
+| 1023 | 31,713 | — | overflows chip | **impossible** |
+| 4095 | 126,945 | — | overflows chip by 13 MB | **impossible** |
+
+**Hard ceiling: 768 sectors = 23,808 emulated bytes, highest address `0x5CFF`.**
+
+`docs/future-eeprom-capacity.md` previously claimed 1023 and 4095 sectors were viable. Those
+rows were wrong — both run past the end of the chip — and have been corrected. Use the table
+above as the authoritative one.
+
+### 2.2 The format cost is the real limiter
+
+`initialize()` already exists; formatting is a manual PC step (`tools/flash_probe`, `F`).
+The probe currently formats **255 sectors**, which the firmware accepts because
+`hasMagicNumbers()` only checks the first 133. If you raise the sector count in the
+firmware, **you must raise `FORMAT_SECTORS` in `tools/flash_probe` to match**, or the board
+will boot, fail `hasMagicNumbers()`, and silently fall back to the internal EEPROM.
+
+At ~45 ms per sector erase (datasheet typical):
+
+| Sectors | Format time |
+|---|---|
+| 133 | ~6 s |
+| 265 | ~12 s |
+| 511 | ~23 s |
+| 768 | ~35 s |
+
+This is acceptable as a **manual, attended** PC operation. It is never acceptable on the
+boot path. If you push much past 511, implement lazy/background formatting before going
+further.
+
+---
+
+## 2A. Policy: all new data goes ABOVE the core EEPROM block
+
+**This is a standing architectural decision. Apply it to every new feature from now on.**
+
+### The rule
+
+Treat `0x0000–0x0FFF` (4096 bytes) as a **frozen ABI**. It is the Speeduino core tune
+block, its offsets are encoded in `reference/speeduino.ini` and in every saved `.msq`, and
+nothing in it may be moved, resized, or reordered — ever. Existing users' tunes depend on
+those absolute offsets byte for byte.
+
+**Every new custom table, calibration, or user data block belongs at `0x1000` and above.**
+
+- `0x1000` is the **base address for all new/custom data.**
+- Never insert or extend a table inside `0x0000–0x0FFF`. Append above it.
+- Never relocate existing core data to "make room". Add a new block instead.
+- A feature that requires resizing a core table is a **tune-format break** — stop and raise
+  it with the user, do not do it silently.
+
+### Why (short version)
+
+- Existing `.msq` files and `speeduino.ini` store **absolute** offsets. Anything moved below
+  4096 is silently mis-read by TunerStudio — no error, just wrong values.
+- The upstream reason for the 4 KB limit was the AVR Mega's 4096-byte physical EEPROM. **We
+  do not support that.**
+- This fork targets a board with 4 MB of flash. The internal-EEPROM fallback (4284 bytes) is
+  a boot-safety net only — it is **not** a size constraint and must not shape feature design.
+
+### Support scope — do not design around devices we do not support
+
+| | |
+|---|---|
+| **Supported, tested** | DropBear v2 + Teensy 4.1, SPI flash storage |
+| **Not supported** | Arduino Mega / any 4 KB EEPROM board, devices without onboard flash |
+| **Compile-only** | Other envs — keep them building, do not design for them |
+
+Do not dilute a feature with `#if defined(ARDUINO_AVR_MEGA2560)` guards, reduced table sizes,
+or "small flash mode" workarounds to accommodate boards we have chosen not to support. Keep
+the other envs *compiling*; do not constrain behaviour for them.
+
+### What this means in practice
+
+1. **Define the block.** Give it a base constant, a size, and a version byte. Keep it in one
+   place, not scattered magic numbers:
+
+   ```c
+   // above STORAGE_END (0xFFF)
+   constexpr uint16_t EEPROM_CUSTOM_BASE    = 0x1000;
+   constexpr uint16_t EEPROM_CUSTOM_VERSION = 1;
+   ```
+
+2. **Add a magic/version header** at the block base so you can detect "not yet initialised"
+   versus "corrupt". Never assume 0xFF means valid.
+
+3. **Range-check every access** against both the block bounds and
+   `flashEEPROM.length()`. `FLASH_EEPROM_BaseClass::read()`/`write()` clamp silently — an
+   overflow looks like working code returning 0xFF.
+
+4. **Widen the addressable range first.** `STORAGE_END` is still `0xFFF` in
+   `storage.cpp:59`, so `MAX_PAGE_ADDRESS` and `STORAGE_SIZE` derive from it. Any block above
+   4095 needs the address space raised deliberately — and note `write()` bounds-checks
+   against `_EEPROM_Emulation_Size` (133 × 31 = **4,123**, highest address `0x101A`), so
+   **there are only 28 spare bytes above the core range right now.** Realistically the first
+   step for any extended table is raising the sector count (see §2.1) and re-formatting.
+
+5. **Re-format after changing geometry.** Bumping sectors invalidates the old format. Three
+   places must agree — if they drift you get a board that silently falls back to internal
+   EEPROM, which looks like "the flash stopped working":
+
+   | Where | Constant | Today |
+   |---|---|---|
+   | `board_teensy41.cpp` | `EmulatedEEPROMMconfig` sectors | **133** |
+   | `tools/flash_probe` | `FORMAT_SECTORS` | 255 |
+   | `tools/eeprom_readback` | `SECTORS_TO_CHECK` | 133 |
+
+   `flash_probe` formats more than the firmware needs, which is harmless (a superset). But if
+   you raise the firmware above the probe's value you will under-format, `hasMagicNumbers()`
+   will fail, and the board will run on internal EEPROM without obvious error. Update all
+   three, re-run `F`, then confirm `verify_storage.py` reports `backend : SPI Flash`.
+
+6. **`uint16_t` is fine** up to 65,535 addresses, so it spans the full 23,808-byte ceiling.
+   What breaks is code that *assumes* `0xFFF`:
+   - `storage.cpp:59` `STORAGE_END`, and `STORAGE_SIZE` / `MAX_PAGE_ADDRESS` derived from it.
+   - `page_crc.cpp` computes a CRC per *page* over `getPageSize(pageNum)`. A new block that
+     is not part of a defined page gets **no CRC coverage at all** — so a corrupted custom
+     table would never be detected. Give new blocks their own checksum.
+   - `updateBlockLimitWriteOps` — check for `uint16_t` overflow arithmetic at larger sizes.
+   - `storage_api_t::read/write` are already `uint16_t` — no change needed.
+
+7. **TunerStudio mirror.** New tables need a matching `reference/speeduino.ini` section at
+   the same offsets. Firmware that writes a block TS cannot read is half a feature.
+
+### Do not
+
+- Put new data in internal RAM as a substitute — it does not persist, and this fork stores
+  tunes in flash.
+- Grow `EEPROM_Bytes_Per_Sector` above 31 (overflows `_ReadWriteBuffer[128]`).
+- Format on the boot path.
+- Assume `0xFF` is a safe "unused" sentinel without a version header.
+- Add new blocks below `0x1000`, even if there is space.
 
 ---
 
@@ -194,6 +345,12 @@ rest of the gotchas.
 - [ ] Data survives a reboot if you changed anything in the write path.
 - [ ] `parkSharedSpiDevices()` is still called around every flash access.
 - [ ] Nothing writes internal EEPROM at runtime.
+- [ ] If you added storage, it is **at `0x1000` or above** and nothing in `0x0000–0x0FFF`
+      moved or changed size.
+- [ ] If you changed the sector count, `FORMAT_SECTORS` in `tools/flash_probe` was updated
+      and the chip was re-formatted.
+- [ ] New blocks have a version/magic header and their own CRC coverage.
+- [ ] Matching `reference/speeduino.ini` offsets added for anything TunerStudio must see.
 - [ ] No debug scaffolding left behind (`slog*`, extra serial commands, test sketches outside
       `tools/`).
 - [ ] If you changed behaviour the handoff doc describes, update it.

@@ -1,8 +1,13 @@
 # Future Plan — Enlarging Speeduino's EEPROM address space
 
-Status: **not implemented.** Current work keeps the proven 7905-byte emulated EEPROM
-layout so existing tunes stay compatible. This document records what must change
-*when* more tables are added and the space runs out.
+Status: **not implemented.** Current work keeps the proven emulated EEPROM layout so
+existing tunes stay compatible. This document records what must change *when* more tables
+are added and the space runs out.
+
+> **Standing policy — see `AGENTS.md` §2A.** All new/custom tables go at **`0x1000` and
+> above**; `0x0000–0x0FFF` is a frozen ABI and is never modified. This fork does not support
+> the AVR Mega or any device without onboard flash, so the 4 KB limit is a compatibility
+> boundary, not a hardware constraint. Design new features for the 23,808-byte ceiling.
 
 ---
 
@@ -84,13 +89,19 @@ space you multiply **sectors**, not bytes-per-sector:
 
 | Target space | Sectors | B/sector | Emulated bytes | Slot size |
 |---|---|---|---|---|
-| 4 KB (today) | 255 | 31 | 7905 | 128 B |
-| 8 KB | 511 | 31 | 15841 | 128 B |
-| 16 KB | 1023 | 31 | 31713 | 128 B |
-| 64 KB | 4095 | 31 | 126945 | 128 B |
+| 4 KB (today) | 133 | 31 | 4123 | 128 B |
+| 8 KB | 265 | 31 | 8215 | 128 B |
+| 15 KB | 511 | 31 | 15841 | 128 B |
+| 23 KB (max) | 768 | 31 | 23808 | 128 B |
 
 Keep `B/sector = 31` and only raise the sector count — that keeps slot size at the
 128-byte buffer limit and keeps wear-levelling behaviour identical.
+
+**Correction (verified against the W25Q32 datasheet and the firmware config):** an earlier
+version of this table listed 1023 and 4095 sectors. Those are **impossible on this part**.
+The chip is 4 MB, the emulation base is 1 MB (leaving 3 MB usable), and each sector is 4 KB
+— so 3 MB / 4 KB = **768 sectors** is the hard ceiling. The 4095-sector row overflowed the
+chip by 13 MB. Do not plan above 768 sectors without moving the base address down.
 
 ### 2.4 The wear-levelling cost (the real reason not to go huge)
 
