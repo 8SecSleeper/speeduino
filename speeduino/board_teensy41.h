@@ -83,6 +83,9 @@ static inline bool pinIsReserved(uint8_t pin) {
       || (pin == 45U) 
       || (pin == 46U) 
       || (pin == 47U) 
+#if defined(USE_SPI_EEPROM)
+      || (pin == 8U)   // Onboard SPI flash /CS on the DropBear v2 mainboard
+#endif
       || pinIsSerial(pin) 
   ;
 }

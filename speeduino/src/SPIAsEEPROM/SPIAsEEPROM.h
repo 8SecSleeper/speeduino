@@ -137,7 +137,9 @@ typedef struct {
 
 typedef struct {
   uint16_t pinChipSelect;
-  SPIClass SPIport;
+  // Pointer, not a by-value copy: the SPI port is a hardware peripheral and on
+  // Teensy 4.x SPIClass has no default constructor, so it cannot be a plain member.
+  SPIClass *SPIport;
 } Flash_SPI_Config;
 
 //Base class for flash read and write. SPI and internal flash inherit from this class. 

@@ -247,7 +247,9 @@ int8_t FLASH_EEPROM_BaseClass::writeFlashBytes(uint32_t address __attribute__((_
 int8_t FLASH_EEPROM_BaseClass::eraseFlashSector(uint32_t address __attribute__((__unused__)), uint32_t length __attribute__((__unused__))){return -1;}
 
 
-#if defined(ARDUINO_ARCH_STM32)
+// Teensy is included because the DropBear v2 mainboard carries a Winbond SPI flash
+// (U3) alongside the Teensy 4.1, wired as a normal single-bit SPI device.
+#if defined(ARDUINO_ARCH_STM32) || defined(CORE_TEENSY)
 
 SPI_EEPROM_Class::SPI_EEPROM_Class(EEPROM_Emulation_Config EmulationConfig, Flash_SPI_Config SPIConfig):FLASH_EEPROM_BaseClass(EmulationConfig)
 {
@@ -257,9 +259,12 @@ SPI_EEPROM_Class::SPI_EEPROM_Class(EEPROM_Emulation_Config EmulationConfig, Flas
 byte SPI_EEPROM_Class::read(uint16_t addressEEPROM){
     //Check if emulated EEPROM is available if not yet start it first.
     if(!_EmulatedEEPROMAvailable){ 
-      SPISettings settings(22500000, MSBFIRST, SPI_MODE0); //22.5Mhz is highest it could get with this. But should be ~45Mhz :-(. 
-      _configSPI.SPIport.beginTransaction(settings);
-      begin(_configSPI.SPIport, _configSPI.pinChipSelect);
+      // 22.5Mhz is highest it could get on STM32. On the Teensy 4.1 DropBear the flash
+      // shares LPSPI4 with the MC33810 drivers, so the clock/mode must match theirs
+      // (acc_mc33810.cpp uses 6MHz, MSBFIRST, MODE0). See board_teensy41.cpp.
+      SPISettings settings(6000000, MSBFIRST, SPI_MODE0);
+      _configSPI.SPIport->beginTransaction(settings);
+      begin(*_configSPI.SPIport, _configSPI.pinChipSelect);
     }
 
     return FLASH_EEPROM_BaseClass::read(addressEEPROM);

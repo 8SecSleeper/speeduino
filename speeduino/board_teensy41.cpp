@@ -1,7 +1,13 @@
 #include "board_definition.h"
 
 #if defined(CORE_TEENSY) && defined(__IMXRT1062__)
+// The Teensy's internal EEPROM is kept available even when USE_SPI_EEPROM is set, so
+// that the board can fall back to it at runtime if the external flash is not detected.
 #include <EEPROM.h>
+#if defined(USE_SPI_EEPROM)
+  #include <SPI.h>
+  #include "src/SPIAsEEPROM/SPIAsEEPROM.h"
+#endif
 #include "src/controllers/vvt/vvtController.h"
 #include "src/controllers/idle/idle.h"
 #include "timers.h"
@@ -14,6 +20,73 @@
 #include "src/pins/pinNumbers_t.h"
 #include "src/controllers/boost/boostController.h"
 #include "globals.h"
+
+#if defined(USE_SPI_EEPROM)
+/*
+***********************************************************************************************************
+* Emulated EEPROM in the onboard SPI flash
+*
+* The DropBear v2 mainboard carries a Winbond W25Q32JVSS (U3) wired to the Teensy 4.1 as a
+* normal single-bit SPI device:
+*   /CS = pin 8,  DI/IO0 = pin 11 (MOSI),  DO/IO1 = pin 12 (MISO),  CLK = pin 13 (SCK)
+* /WP (IO2) and /HOLD (IO3) are hard-tied to +3V3 on the PCB, so quad/QSPI mode cannot be
+* used even when a QSPI-capable part is fitted. The existing winbondFlashSPI driver handles it.
+*
+* IMPORTANT: these pins are the Teensy's LPSPI4 (the global `SPI` object) and are *shared*
+* with both MC33810 injector/ignition drivers (U7/U8, CS on pins 9 and 10). The MC33810
+* runtime path calls SPI.transfer16() without a transaction wrapper, and on Teensy 4
+* beginTransaction() only reprograms the port when the clock actually changes. So the flash
+* MUST run at the same clock/mode as the MC33810s, or the two will corrupt each other.
+*/
+static constexpr uint8_t  PIN_SPI_FLASH_CS   = 8U;       // DropBear v2 U3 /CS
+static constexpr uint32_t SPI_FLASH_CLOCK_HZ = 6000000U; // Must match acc_mc33810.cpp
+
+// 255 sectors * 31 bytes = 7905 bytes of emulated EEPROM. Speeduino only addresses
+// 0..4095 (see STORAGE_END in storage.cpp), so this comfortably covers the requirement.
+// The 1MB base address leaves the start of the chip untouched.
+static EEPROM_Emulation_Config EmulatedEEPROMMconfig{255UL, 4096UL, 31UL, 0x00100000UL};
+static Flash_SPI_Config SPIconfig{PIN_SPI_FLASH_CS, &SPI};
+static SPI_EEPROM_Class flashEEPROM(EmulatedEEPROMMconfig, SPIconfig);
+
+/** @brief Probe and initialise the external flash, once.
+ *
+ * @return true if the external flash is present and usable as emulated EEPROM.
+ *
+ * @note This runs from getBoardStorageApi(), which is called before the pin mapping is
+ * applied, so the board ID is not yet known. Detection is therefore by probing the chip's
+ * JEDEC ID. If the chip is absent the caller falls back to the Teensy's internal EEPROM,
+ * so enabling USE_SPI_EEPROM is safe on Teensy 4.1 boards without the external chip.
+ */
+static bool initialiseFlashEEPROM(void)
+{
+  static int8_t flashState = -1; // -1 = not yet attempted, 0 = unavailable, 1 = ready
+  if (flashState < 0)
+  {
+    SPI.begin();
+    SPI.beginTransaction(SPISettings(SPI_FLASH_CLOCK_HZ, MSBFIRST, SPI_MODE0));
+    flashState = flashEEPROM.begin(SPI, PIN_SPI_FLASH_CS);
+  }
+  return flashState == 1;
+}
+
+// storage_api_t adapters for the emulated EEPROM held in the external SPI flash.
+// These mirror the shape of board_eeprom_adapter.hpp, but bind to flashEEPROM
+// rather than the Teensy's internal EEPROM object.
+static byte readFlashEeprom(uint16_t address)
+{
+  return flashEEPROM.read(address);
+}
+
+static void writeFlashEeprom(uint16_t address, byte val)
+{
+  (void)flashEEPROM.write(address, val);
+}
+
+static uint16_t lengthFlashEeprom(void)
+{
+  return flashEEPROM.length();
+}
+#endif
 
 static void PIT_isr();
 static void TMR1_isr(void);
@@ -402,7 +475,14 @@ void boardInitPins(uint8_t, pinNumbers_t &pins)
 
 static uint16_t getEepromWriteBlockSize(const statuses &current)
 {
+#if defined(USE_SPI_EEPROM)
+  // For use with the onboard Winbond SPI flash. Writes are page-programmed, and only
+  // an occasional sector erase + rewrite occurs, so the block size can be lower than
+  // for the internal EEPROM but should stay modest to avoid long bus stalls.
+  uint16_t maxWrite = 20;
+#else
   uint16_t maxWrite = 64;
+#endif
 
   // Write to EEPROM more aggressively if the engine is not running
   if(current.RPM==0U)
@@ -416,6 +496,20 @@ static uint16_t getEepromWriteBlockSize(const statuses &current)
 /** @brief Get the EEPROM storage API for the board */
 storage_api_t getBoardStorageApi(void)
 {
+#if defined(USE_SPI_EEPROM)
+  // Prefer the onboard SPI flash when it is present. If the chip cannot be detected
+  // (E.g. a Teensy 4.1 board without one fitted) fall through to the internal EEPROM
+  // so that the firmware still runs.
+  if (initialiseFlashEEPROM())
+  {
+    return storage_api_t{
+      .read = readFlashEeprom,
+      .write = writeFlashEeprom,
+      .length = lengthFlashEeprom,
+      .getMaxWriteBlockSize = getEepromWriteBlockSize,
+    };
+  }
+#endif
   return getEEPROMStorageApi(getEepromWriteBlockSize);
 }
 
