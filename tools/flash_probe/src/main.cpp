@@ -286,7 +286,15 @@ static void doSweep()
   Serial.println(F(" The real CS should be the only one returning EF 40 xx."));
   Serial.println(F(" (Bus noise can make others look non-zero, so look for 0xEF specifically.)\r\n"));
 
-  static const uint8_t candidates[] = { 6, 8, 10, 9, 7, 5, 4, 3, 2 };
+  // Only pins that are harmless to drive on a DropBear v2 are swept. Deliberately
+  // EXCLUDED because they are wired to real hardware in the Speeduino DropBear mapping:
+  //   pin 5      = pinFuelPump   -> driving it would run the fuel pump
+  //   pin 9, 10  = MC33810 #1/#2 chip selects
+  //   pin 7, 8   = Serial2 RX/TX
+  // Pin 8 is included below anyway because the firmware used to wrongly treat it as CS,
+  // so proving it is NOT the flash is useful. It only breaks secondary serial while
+  // this test sketch runs, which does not matter here.
+  static const uint8_t candidates[] = { 6, 8, 2, 3, 4 };
   for (uint8_t pin : candidates)
   {
     ProbeResult r = probe(pin);
