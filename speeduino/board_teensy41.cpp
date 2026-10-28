@@ -56,10 +56,14 @@ static constexpr uint8_t PIN_MC33810_1_CS = 10U;
 static constexpr uint8_t PIN_MC33810_2_CS = 9U;
 
 // 133 sectors * 31 bytes = 4123 bytes of emulated EEPROM. Speeduino only addresses
-// 0..4095 (see STORAGE_END in storage.cpp), so this is the smallest count that still
-// covers the requirement. It matters because initialize() formats EVERY sector on first
-// boot, and that cost is linear in the sector count - 255 sectors is a ~2x longer stall
-// on the boot path than 133. Raise this only if STORAGE_END grows.
+// 0..4095 (see STORAGE_END in storage.cpp), so this covers the requirement with the
+// fewest sectors, which matters because initialize() formats every sector on first
+// boot and that cost is linear in the sector count.
+//
+// NOTE: _ReadWriteBuffer is 128 bytes and holds one whole per-byte slot. Slot size is
+// Flash_Sector_Size/(EEPROM_Bytes_Per_Sector+1) = 4096/32 = 128, so this is exactly at
+// the limit. Do NOT raise EEPROM_Bytes_Per_Sector - that would shrink the slot below
+// what the buffer needs and overflow it.
 // The 1MB base address leaves the start of the chip untouched.
 static EEPROM_Emulation_Config EmulatedEEPROMMconfig{133UL, 4096UL, 31UL, 0x00100000UL};
 static Flash_SPI_Config SPIconfig{PIN_SPI_FLASH_CS, &SPI};

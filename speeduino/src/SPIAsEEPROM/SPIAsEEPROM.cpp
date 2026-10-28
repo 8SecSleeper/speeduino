@@ -263,14 +263,31 @@ SPI_EEPROM_Class::SPI_EEPROM_Class(EEPROM_Emulation_Config EmulationConfig, Flas
 }
 
 byte SPI_EEPROM_Class::read(uint16_t addressEEPROM){
-    //Check if emulated EEPROM is available if not yet start it first.
-    if(!_EmulatedEEPROMAvailable){ 
+    // Attempt lazy init at most ONCE.
+    //
+    // This used to be guarded only by !_EmulatedEEPROMAvailable, which is a trap:
+    // initialize() clears that flag at the start and only sets it again if the format
+    // succeeded. So if the format ever failed, EVERY subsequent read() re-ran
+    // begin() -> initialize() -> clear(), i.e. another full multi-second reformat.
+    // With read() being called thousands of times during loadAllPages() that never
+    // terminates, which is exactly the "boot, format, die, repeat" cycle on the
+    // DropBear v2. Once attempted, never try again - a failed device stays failed and
+    // getBoardStorageApi() has already fallen back to the internal EEPROM.
+    static bool initAttempted = false;
+    if(!_EmulatedEEPROMAvailable && !initAttempted){
+      initAttempted = true;
       // 22.5Mhz is highest it could get on STM32. On the Teensy 4.1 DropBear the flash
       // shares LPSPI4 with the MC33810 drivers, so the clock/mode must match theirs
       // (acc_mc33810.cpp uses 6MHz, MSBFIRST, MODE0). See board_teensy41.cpp.
       SPISettings settings(6000000, MSBFIRST, SPI_MODE0);
       _configSPI.SPIport->beginTransaction(settings);
       begin(*_configSPI.SPIport, _configSPI.pinChipSelect);
+    }
+
+    if(!_EmulatedEEPROMAvailable){
+      // Not usable. Return the erased value rather than reading a device we know is
+      // broken, so callers see a blank tune instead of hanging.
+      return 0xFF;
     }
 
     return FLASH_EEPROM_BaseClass::read(addressEEPROM);
