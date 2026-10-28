@@ -83,7 +83,11 @@ static const JedecInfo JEDEC_TABLE[] = {
 // Low level helpers
 // ---------------------------------------------------------------------------
 static void csLow()  { digitalWriteFast(PIN_CS, LOW);  }
-static void csHigh() { digitalWriteFast(PIN_CS, HIGH); }
+// The W25Q requires CS high time (tSHSL) of at least 50ns between commands. On a
+// 600MHz Teensy digitalWriteFast toggles in a few nanoseconds, so two back-to-back
+// commands (WREN then ERASE) can run together and the second is silently dropped.
+// That is exactly what makes erase/program appear to do nothing while reads work.
+static void csHigh() { digitalWriteFast(PIN_CS, HIGH); delayMicroseconds(1); }
 
 // Forward declared: clearBlockProtect() is defined before writeEnable()
 static void writeEnable();
@@ -148,7 +152,6 @@ static void writeEnable()
   xfer(CMD_WRITE_ENABLE);
   csHigh();
 }
-
 // ---------------------------------------------------------------------------
 // Probe
 // ---------------------------------------------------------------------------

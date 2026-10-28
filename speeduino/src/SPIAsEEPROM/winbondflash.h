@@ -107,8 +107,15 @@ private:
     return y;
   }
 
+  // The W25Q requires CS high time (tSHSL) of at least 50ns between commands. On a
+  // 600MHz Teensy, digitalWrite + SPI.transfer complete in a few nanoseconds, so two
+  // back-to-back commands (WREN followed by PAGE_PROGRAM or SECTOR_ERASE) can run
+  // together. The chip then silently drops the second command, which shows up as
+  // erase/program doing nothing at all while reads keep working. A 1us delay is far
+  // more than the required 50ns and is negligible next to a page program (~0.7ms).
   inline void deselect() {
     digitalWrite(nss,HIGH);
+    delayMicroseconds(1);
   }
 
 public:
