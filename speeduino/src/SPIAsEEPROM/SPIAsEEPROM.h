@@ -239,6 +239,14 @@ class FLASH_EEPROM_BaseClass
     uint32_t _Addres_Translation_Size;
     uint32_t _EEPROM_Emulation_Size;
 
+    /**
+     * @brief Whether the backing device already carries the emulation magic numbers.
+     *
+     * Public wrapper around the private check, so a board can decide whether a device
+     * is usable without triggering a format.
+     */
+    bool isFormatted(void) { return checkForMagicNumbers(); }
+
   private:
 
     /**
@@ -308,6 +316,37 @@ class SPI_EEPROM_Class : public FLASH_EEPROM_BaseClass
      * @return success 
      */
     int8_t begin(SPIClass&, uint8_t);
+
+
+    /**
+     * Detect the SPI flash and configure the driver, WITHOUT formatting it.
+     *
+     * Use this instead of begin() when formatting must not happen on the boot path.
+     * begin() calls initialize(), which erases and rewrites every sector (~6s on a
+     * 133-sector W25Q32) and can block indefinitely if anything goes wrong - fatal
+     * during startup, before USB is available.
+     *
+     * @param spi SPI port the chip is on
+     * @param chipSelect chip select pin
+     * @return true if a supported Winbond device replied
+     */
+    bool detectDevice(SPIClass &spi, uint8_t chipSelect);
+
+    /**
+     * Check whether the device already carries the emulation magic numbers.
+     *
+     * Only valid after detectDevice() has succeeded.
+     *
+     * @return true if every used sector starts with the magic numbers
+     */
+    bool hasMagicNumbers(void);
+
+    /** Mark the device as usable, after hasMagicNumbers() returned true.
+     *
+     * Sets the internal flags that would normally be set by a successful initialize(),
+     * so read()/write() operate without attempting any formatting.
+     */
+    void markAvailable(void);
 
 
     /**

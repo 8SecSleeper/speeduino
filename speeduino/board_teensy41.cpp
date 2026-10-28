@@ -82,14 +82,51 @@ static void deselectSharedSpiDevices(void)
   digitalWrite(PIN_MC33810_2_CS, HIGH);
 }
 
-/** @brief Probe and initialise the external flash, once.
+/*
+***********************************************************************************************************
+* Boot trace ("black box")
+*
+* The failure mode we are chasing resets the CPU before USB enumerates, so there is no
+* way to print where it died. The Teensy's internal EEPROM DOES work and survives a
+* reset, so write a marker at each milestone. Read them back afterwards with
+* tools/boot_trace - no serial needed during the failure.
+*
+* Stored above the 4096 bytes Speeduino uses for the tune, so it cannot corrupt a tune.
+*/
+static constexpr uint16_t BOOT_TRACE_BASE = 4220U;
+static constexpr uint16_t BOOT_TRACE_LEN  = 48U;
+static uint8_t bootTraceIndex = 0;
+
+/** @brief Clear the trace. Call first, so stale markers are not mistaken for progress. */
+static void bootTraceReset(void)
+{
+  bootTraceIndex = 0;
+  for (uint16_t i = 0; i < BOOT_TRACE_LEN; i++) { EEPROM.update(BOOT_TRACE_BASE + i, 0xFF); }
+}
+
+/** @brief Record progress. Markers are small codes, see boot_trace sketch for the list. */
+static void bootTrace(uint8_t marker)
+{
+  if (bootTraceIndex < BOOT_TRACE_LEN)
+  {
+    EEPROM.update(BOOT_TRACE_BASE + bootTraceIndex, marker);
+    ++bootTraceIndex;
+  }
+}
+
+/** @brief Prepare the emulated EEPROM in the onboard SPI flash.
  *
- * @return true if the external flash is present and usable as emulated EEPROM.
+ * @return true if the flash is detected AND already formatted, so it is safe to use.
  *
- * @note This runs from getBoardStorageApi(), which is called before the pin mapping is
- * applied, so the board ID is not yet known. Detection is therefore by probing the chip's
- * JEDEC ID. If the chip is absent the caller falls back to the Teensy's internal EEPROM,
- * so enabling USE_SPI_EEPROM is safe on Teensy 4.1 boards without the external chip.
+ * @note This deliberately does NOT format the chip. Formatting is 133 sector erases
+ * (~6s) or, if anything goes wrong, far longer - all of it on the boot path before USB
+ * is even set up, so the board never enumerates and appears to reset forever. That is
+ * the boot loop this board exhibited.
+ *
+ * If the chip is detected but not formatted, we report NotDetected and fall back to the
+ * Teensy's internal EEPROM, which is a working board. The chip is then formatted from
+ * the PC using tools/flash_probe ('F' key), which writes the same magic numbers. That
+ * keeps multi-second blocking work off the boot path entirely.
  */
 static bool initialiseFlashEEPROM(void)
 {
@@ -97,15 +134,40 @@ static bool initialiseFlashEEPROM(void)
   if (!initialised)
   {
     initialised = true;
+    bootTrace(0x10); // entering flash init
+
     // Do this BEFORE SPI.begin() so nothing else can answer on MISO.
     deselectSharedSpiDevices();
+    bootTrace(0x11); // MC33810 CS parked
+
     SPI.begin();
+    bootTrace(0x12); // SPI begun
+
     SPI.beginTransaction(SPISettings(SPI_FLASH_CLOCK_HZ, MSBFIRST, SPI_MODE0));
-    bool available = flashEEPROM.begin(SPI, PIN_SPI_FLASH_CS);
-    // Publish which backend we ended up on so TunerStudio can report it (status5 bits 6-7)
-    currentStatus.storageBackend = available
-      ? statuses::StorageBackend::ExternalFlash
-      : statuses::StorageBackend::NotDetected;
+    bootTrace(0x13); // transaction started
+
+    // Detect the chip first. This is only a JEDEC ID read - no writes.
+    bool detected = flashEEPROM.detectDevice(SPI, PIN_SPI_FLASH_CS);
+    bootTrace(detected ? 0x14 : 0x15); // 0x14 detected, 0x15 not detected
+
+    if (!detected)
+    {
+      currentStatus.storageBackend = statuses::StorageBackend::NotDetected;
+    }
+    else if (flashEEPROM.hasMagicNumbers())
+    {
+      // Already formatted (normally by tools/flash_probe). Safe to use.
+      flashEEPROM.markAvailable();
+      currentStatus.storageBackend = statuses::StorageBackend::ExternalFlash;
+      bootTrace(0x16); // magic numbers OK, using flash
+    }
+    else
+    {
+      // Present but blank. Do NOT format here. Run tools/flash_probe and press 'F'.
+      currentStatus.storageBackend = statuses::StorageBackend::NotDetected;
+      bootTrace(0x17); // detected but NOT formatted
+    }
+    bootTrace(0x18); // flash init complete
   }
   return currentStatus.storageBackend == statuses::StorageBackend::ExternalFlash;
 }
@@ -537,12 +599,17 @@ static uint16_t getEepromWriteBlockSize(const statuses &current)
 /** @brief Get the EEPROM storage API for the board */
 storage_api_t getBoardStorageApi(void)
 {
+  // Clear any stale markers from a previous boot, then leave a trail. If the board
+  // reset-loops, whatever markers are present afterwards show how far it got.
+  bootTraceReset();
+  bootTrace(0x01); // getBoardStorageApi() entered
 #if defined(USE_SPI_EEPROM)
   // Prefer the onboard SPI flash when it is present. If the chip cannot be detected
   // (E.g. a Teensy 4.1 board without one fitted) fall through to the internal EEPROM
   // so that the firmware still runs.
   if (initialiseFlashEEPROM())
   {
+    bootTrace(0x20); // returning the SPI-flash API
     return storage_api_t{
       .read = readFlashEeprom,
       .write = writeFlashEeprom,
@@ -551,6 +618,7 @@ storage_api_t getBoardStorageApi(void)
     };
   }
 #endif
+  bootTrace(0x21); // returning the internal EEPROM API
   return getEEPROMStorageApi(getEepromWriteBlockSize);
 }
 

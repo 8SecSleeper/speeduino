@@ -257,6 +257,16 @@ int8_t FLASH_EEPROM_BaseClass::eraseFlashSector(uint32_t address __attribute__((
 static constexpr uint32_t FLASH_BUSY_TIMEOUT_MS  = 50U;   // status reads / page program
 static constexpr uint32_t FLASH_ERASE_TIMEOUT_MS = 1000U; // 4KB sector erase (400ms worst case)
 
+// A full format erases and writes every sector. If that ever costs more than this we
+// give up on the device for this boot rather than sitting on the boot path: the caller
+// falls back to the internal EEPROM, which is better than a board that never starts.
+static constexpr uint32_t FLASH_FORMAT_BUDGET_MS = 2000U;
+
+// Set when a format attempt had to be abandoned, so nothing retries it.
+static bool formatBudgetExceeded = false;
+
+bool flashEepromFormatBudgetExceeded(void) { return formatBudgetExceeded; }
+
 SPI_EEPROM_Class::SPI_EEPROM_Class(EEPROM_Emulation_Config EmulationConfig, Flash_SPI_Config SPIConfig):FLASH_EEPROM_BaseClass(EmulationConfig)
 {
   _configSPI = SPIConfig;
@@ -299,6 +309,26 @@ int8_t SPI_EEPROM_Class::begin(SPIClass &_spi, uint8_t pinSPIFlash_CS=6){
     flashavailable = winbondSPIFlash.begin(winbondFlashClass::partNumber::autoDetect, _spi, pinSPIFlash_CS);
     return FLASH_EEPROM_BaseClass::initialize(flashavailable);
 }    
+
+bool SPI_EEPROM_Class::detectDevice(SPIClass &_spi, uint8_t pinSPIFlash_CS){
+    // Configure the pin and probe the JEDEC ID. This performs no writes or erases, so
+    // it is safe to call on the boot path even if the device turns out to be blank.
+    pinMode(pinSPIFlash_CS, OUTPUT);
+    bool available = winbondSPIFlash.begin(winbondFlashClass::partNumber::autoDetect, _spi, pinSPIFlash_CS);
+    _FlashAvailable = available;
+    _EmulatedEEPROMAvailable = false;
+    return available;
+}
+
+bool SPI_EEPROM_Class::hasMagicNumbers(void){
+    if(!_FlashAvailable){ return false; }
+    return isFormatted();
+}
+
+void SPI_EEPROM_Class::markAvailable(void){
+    _FlashAvailable = true;
+    _EmulatedEEPROMAvailable = true;
+}
 
 int8_t SPI_EEPROM_Class::readFlashBytes(uint32_t address, byte *buf, uint32_t length){
   // Bounded wait: a missing or contending chip must never hang the firmware during
