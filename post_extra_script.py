@@ -25,8 +25,17 @@ def wait_for_monitor_port(source, target, env):
     port = get_env_port(env, "monitor_port") or get_env_port(env, "upload_port") or get_env_port(env, "test_port")
     if port is None:
         from platformio.builder.tools.pioupload import AutodetectUploadPort
-        AutodetectUploadPort(env)
-        port = env.subst("$UPLOAD_PORT")
+        try:
+            AutodetectUploadPort(env)
+            port = env.subst("$UPLOAD_PORT")
+        except Exception as exc:
+            # AutodetectUploadPort enumerates the boards of EVERY installed platform.
+            # A malformed third-party platform (atmelsam has a board with no openocd
+            # chipname) makes it raise, which would fail the whole upload even though
+            # the upload itself already succeeded. Port autodetection is only needed to
+            # pause briefly before opening the monitor, so a failure here is harmless.
+            print(f"Port autodetect skipped: {exc}")
+            port = None
     if port:
         # We have a port specified, wait for it to activate
         wait_for_port(port)

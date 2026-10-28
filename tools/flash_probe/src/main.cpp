@@ -79,6 +79,15 @@ static const JedecInfo JEDEC_TABLE[] = {
   { 0x18, 16UL * 1024 * 1024,"W25Q128 (16MB)" },
 };
 
+// Safety interlock.
+// The Teensy 4.1 carries its OWN W25Q64JV (8MB, capacity 0x17) on FlexSPI1, and the
+// running program is executed from it. That chip is not reachable from this sketch -
+// it has no Teensy pin number and is not on LPSPI4 - but if this tool ever DID report
+// an 8MB part, something is badly miswired and erasing it would brick the board. So
+// the destructive operations refuse to run unless the chip identifies as the 4MB part.
+static constexpr uint8_t TEENSY_INTERNAL_FLASH_CAPACITY = 0x17; // 8MB W25Q64JV
+static constexpr uint8_t DROPBEAR_FLASH_CAPACITY        = 0x16; // 4MB W25Q32JV
+
 // ---------------------------------------------------------------------------
 // Low level helpers
 // ---------------------------------------------------------------------------
@@ -200,6 +209,24 @@ static ProbeResult probe(uint8_t csPin)
     r.welSet  = (sr & SR1_WEL)  != 0U;
   }
   return r;
+}
+
+static bool destructiveOpsAllowed(const ProbeResult &r)
+{
+  if (r.capacity == TEENSY_INTERNAL_FLASH_CAPACITY)
+  {
+    Serial.println(F("  REFUSING: this looks like the Teensy's OWN program flash (8MB)."));
+    Serial.println(F("  Erasing that would destroy the running firmware and brick the"));
+    Serial.println(F("  board. The DropBear's external flash is a 4MB W25Q32 (EF 40 16)."));
+    Serial.println(F("  Check the wiring before continuing."));
+    return false;
+  }
+  if (r.capacity != DROPBEAR_FLASH_CAPACITY)
+  {
+    Serial.println(F("  REFUSING: unexpected capacity byte; expected 0x16 (4MB W25Q32)."));
+    return false;
+  }
+  return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -420,6 +447,7 @@ static void doWriteTest()
 
   ProbeResult r = probe(PIN_CS);
   if (!r.responded) { Serial.println(F("  Aborting: no chip on CS pin 6.")); return; }
+  if (!destructiveOpsAllowed(r)) { return; }
 
   uint8_t pattern[32];
   for (uint8_t i = 0; i < sizeof(pattern); i++) { pattern[i] = (uint8_t)(0xA5 ^ i); }
@@ -505,6 +533,7 @@ static void doFormat()
 
   ProbeResult r = probe(PIN_CS);
   if (!r.responded) { Serial.println(F("  Aborting: no chip responded.")); return; }
+  if (!destructiveOpsAllowed(r)) { return; }
 
   const uint8_t magic[4] = { FORMAT_MAGIC_1, FORMAT_MAGIC_2, FORMAT_MAGIC_3, FORMAT_MAGIC_4 };
   uint32_t t0 = millis();
