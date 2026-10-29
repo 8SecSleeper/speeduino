@@ -1,132 +1,96 @@
-# Walkthrough — TunerStudio layout reorganization
+# Walkthrough — TunerStudio layout, second pass
 
-Everything below is **INI-only**. No firmware change, so nothing needs
-flashing, and no EEPROM block was touched.
+INI-only. No firmware change, no EEPROM change, nothing to flash.
 
-## What was done
+## What changed in this pass
 
-| Phase | Change | Commit |
-|---|---|---|
-| 0 | Fixed 9 malformed dialog/menu statements; re-enabled the knock-window panel | `404a47de` |
-| 1 | Replaced the `[Menu]` block with 12 subsystem menus | `404a47de` |
-| 3 | Added `tools/ini_lint/check_ini_layout.py` + CI workflow | `404a47de` |
-| 2 | `indexCard` tab pilot on idle settings; fixed 3 malformed note rows | `404a47de` |
+| Your feedback | Done |
+|---|---|
+| Secondary fuel/spark should sit directly below their parent tables, `VE Table` → `VE Table 2` | Done — folder gone, secondary tables sit right under their parents |
+| `VE Table` + `VE Table Options` should be one entry, options inside the table | Done for VE, VE Table 2 and Advance Table 2 |
+| Move Power Adders out of Boost, keep Boost clean for the rework | Done — Nitrous / WMI now under `&Outputs > Power Adders`; `&Boost` is two entries |
+| ASE before WUE in Warmup | Done |
+| Put back a tab with all the 3D maps | Done — `3D &Maps`, plain table views |
+| Idle settings: P and I unreachable, hard to read | Reworked — see below |
 
-Files touched:
+### `indexCard` failed — worth recording
+
+The idle pilot confirmed `indexCard` is **not implemented**. What you saw is
+exactly its failure mode: all three child panels drawn at once in a cramped
+right column with the dialog broken around them. That matches the research
+finding that no shipping INI uses it.
+
+So idle now uses the idiom MS3 and rusEFI actually use — `border` + columns:
 
 ```
-reference/speeduino.ini              (the work)
-tools/ini_lint/check_ini_layout.py   (new validator)
-.github/workflows/ini-layout.yml     (new CI job)
-docs/tunerstudio-layout.md           (new: rules + old→new mapping)
+Idle Settings
+├── North  : idle control type, crank taper, idle-up input/output
+└── Center : [ PWM Idle ] [ Stepper Idle ] [ Closed loop Idle ]   side by side
 ```
 
-## The headline numbers
+P and I were unreachable because the content exceeded the dialog height and the
+title row pushed it down — TunerStudio clips rather than scrolls. Three columns
+side by side roughly a third the previous height. **If P and I are still cut
+off, tell me**: the next lever is dropping the `#Fast Idle` row and the
+"1.0 means 100%" banner, then reducing further.
 
-- **81** distinct objects reachable from the menu before, **81** after. Nothing lost.
-- **76** of them moved to a new subsystem menu.
-- Top-level menus: `Settings`, `Tuning`, `Spark`, `Startup/Idle`, `Accessories`,
-  `3D &Tuning Maps` are gone; `&Engine`, `&Fuel`, `&Ignition`, `&Warmup`, `&Idle`,
-  `&Boost`, `&Sensors`, `&Outputs`, `&Protection` replace them.
-- **0** errors and **0** warnings from the linter.
-- `[Constants]` digest `6aedac05452d1188` — unchanged, so every existing `.msq` still loads.
+`Idle Up Settings` no longer has its own menu entry — it is inside Idle Control
+now.
 
-## Real bugs fixed (not style)
+## Please check
 
-These were all silently wrong before:
-
-1. **Six menu entries in `3D &Tuning Maps` were missing a comma** between target
-   and label — `subMenu = dwell_tblMap "Dwell Map"`, and five more just like it.
-   TunerStudio parsed the whole string as the target name, so those entries were
-   almost certainly dead. Now `dwell_map`, `stagingTableDialog`, `boostDCLupTbl`,
-   `vvtTbl`, `vvt2Tbl`, `wmiTbl`.
-2. **Five dialogs had a page number where the layout goes** —
-   `dialog = sparkSettings,"Spark Settings",4`. Not a valid layout.
-3. **Seven dialogs declared with no title argument.**
-4. **A dialog named `selectionOfEdianness.`** — trailing period, and "Edianness"
-   misspelt. Renamed to `selectionOfEndianness`, reference updated.
-5. **`knock_windows` panel was commented out**, so the entire knock-window UI
-   was unreachable even though the settings dialog referred to it. Re-enabled.
-6. **Three note rows** used `field = "text", , {}, {...}, {...}` — an empty
-   constant slot plus a duplicated visibility expression.
-7. **`Data Logging` was effectively empty on this fork** because its entries were
-   gated on `arrayValue(array.boardHasRTC, pinLayout) > 0`, which is always false
-   on DropBear. Gate removed.
-8. **`rtc_setup`** was a dead duplicate of `rtc_settings` with zero references. Removed.
-
-## What you need to check (I cannot run TunerStudio)
-
-### 1. Load the INI — most important
-
-Point TunerStudio at `reference/speeduino.ini` and open a project. Confirm:
-
-- [ ] No parse error / "error in ini" dialog.
-- [ ] The top menu bar shows approximately: **Engine, Fuel, Ignition, Warmup,
-      Idle, Boost, Sensors, Outputs, Protection**, plus TS's own
-      **Tools, Data Logging, Help**.
-- [ ] An existing saved tune still opens with no signature mismatch and values
-      look unchanged.
-
-If TunerStudio rejects the INI, stop here and tell me the exact message — that is
-the one thing my linter cannot prove.
-
-### 2. The `indexCard` pilot — decides Phase 2's direction
+### 1. Idle Control — the one most likely to need another pass
 
 Open **Idle → Idle Control**.
 
-- [ ] Do you see **tabs** (PWM Idle / Stepper Idle / Closed loop Idle)?
-- [ ] Or do the three sections just stack vertically (old behaviour)?
-- [ ] Or does the dialog fail to open?
+- [ ] P, I and D are all visible and reachable.
+- [ ] The three columns sit side by side rather than stacked.
+- [ ] Idle-up settings appear underneath.
+- [ ] Nothing is clipped at the bottom.
 
-All three answers are useful; the first enables tabbed consolidation everywhere,
-the second is the safe fallback and I'll revert this one dialog.
+### 2. Table dialogs — verify the `Center`/`East` split works
 
-### 3. Spot-check the reorganization
+Open **Fuel → VE Table**.
 
-- [ ] **Fuel** — VE Table, VE Table Options, AFR + Lambda target tables, then a
-      `Corrections` group, then `Secondary Fuel`. They used to be in three
-      different menus.
-- [ ] **Ignition** — Spark table, Spark Settings, Dwell, then `Spark Corrections`,
-      then `Secondary Spark`, then Knock, then Rotary (only when `sparkMode == 4`).
-- [ ] **Boost** — `Boost Control`, then `Boost Mode and Tables`, then
-      `Power Adders` (Nitrous / WMI).
-- [ ] **Sensors → Calibration** — the four calibration entries now live here
-      instead of under `Tools`. They are still offered under `Tools` as well;
-      say so if you'd rather I remove one of the two.
-- [ ] **Protection** — all six rev/boost/oil/AFR entries together.
-- [ ] **Idle → Idle Curves** — the five curves, each appearing only for the idle
-      algorithm that uses it. Change idle control type and confirm they swap.
+- [ ] The table is on the left and **grows** when you widen the window.
+- [ ] An `Options` column sits on the right with *Multiply VE value by MAP
+      ratio* and the legacy options.
+- [ ] There is no separate `VE Table Options` entry in the Fuel menu any more.
 
-### 4. Conditions still hide things correctly
+Then **Fuel → VE Table 2** (only shows if secondary fuel is enabled) and
+**Ignition → Ignition Advance Table 2**: same shape, options on the right.
 
-These are the ones most likely to look "missing" if an expression is wrong:
+### 3. Menu order
 
-- [ ] `Flex Fuel` only appears in **Fuel** when flex is enabled.
-- [ ] `Dwell Map` only appears in **Ignition** when `useDwellMap`.
-- [ ] `VVT2` table only when both VVT and VVT2 are enabled.
-- [ ] The WMI table only when WMI is on and `wmiMode > 1`.
-- [ ] Boost entries only when boost control is enabled.
+- [ ] **Fuel**: `VE Table`, `VE Table 2`, `Staged Injection` | AFR/Lambda/EGO | Corrections | Flex Fuel
+- [ ] **Ignition**: `Ignition Advance Table`, `Ignition Advance Table 2` | Spark Settings | Dwell | Spark Corrections | Sequential Trim | Knock | Rotary
+- [ ] **Warmup**: Cranking, Priming | **ASE, then WUE**
+- [ ] **Boost**: only `Boost Control` and `Boost Mode and Tables`
+- [ ] **Outputs → Power Adders**: Nitrous, Water-Methanol, WMI table
+- [ ] **3D &Maps**: all the tables as plain views, no options columns
 
-## If something is wrong
+### 4. Still fine?
 
-Every change is in one commit and the previous state is intact, so a single
-revert is safe:
+- [ ] No parse error, menu bar looks right, saved tune unchanged.
+
+## Known trade-off I made
+
+`3D &Maps` lists tables that also appear in their subsystem menu. That is a
+deliberate exception to the one-canonical-home rule, because you asked for the
+combined maps tab back and it is a common way to work. Only menu *entries*
+repeat — every table is still defined once, so nothing can drift. If it ever
+becomes confusing I can gate the per-subsystem copies behind a setting.
+
+## Diagnostics, if something looks wrong
 
 ```cmd
-git revert 404a47de
+python tools/ini_lint/check_ini_layout.py reference/speeduino.ini
 ```
 
-I deliberately did **not** restructure `boostSettings`, `NitrousControl`,
-`aircon` or `vvtSettings`: inspection showed they are already well composed from
-sub-panels. The fragmentation was in the *menu layer*, which is what changed.
+Reports dangling menu targets, dangling `panel =` references, nested
+`groupMenu`, duplicates within a menu, malformed dialog headers, and anything
+that became unreachable. The `[Constants]` digest printed on every run must stay
+`6aedac05452d1188` — anything else means tune offsets moved, which would
+invalidate existing `.msq` files.
 
-## Deliberately left alone
-
-- `Canout_config` and its 8 dialogs stay commented out (per the agreed default;
-  CAN output is not validated on DropBear).
-- `Hardware Testing` stays hidden behind `#unset enablehardware_test`.
-- Settings that appear in more than one dialog — `CrankAng` (`sparkSettings` and
-  `crankingIgnOptions`), `fpPrime` (`fuelpump` and `crankingOptions`),
-  `vvtFreq`/`vvt2Pin` (`vvtSettings` and `wmiSettings`) — were **not** removed.
-  They are shown under different conditions in different workflows, so removing
-  one side is a judgement call about how you tune. Flag it and I'll consolidate.
+Revert this pass with `git revert f0509c95`.
