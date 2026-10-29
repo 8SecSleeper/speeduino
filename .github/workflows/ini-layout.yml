@@ -1,0 +1,38 @@
+name: Validate INI layout
+
+# Upstream's validate-ini.yml checks that reference/speeduino.ini *parses*.
+# It cannot know whether our own [Menu] entries point at dialogs we actually
+# defined, because both live in the same file. This job fills that gap: it
+# fails if a menu target or panel reference does not resolve, if a groupMenu
+# is nested inside another groupMenu (the spec forbids it), if an object is
+# listed twice in one menu, or if a dialog header is malformed.
+#
+# Run locally the same way:
+#     python tools/ini_lint/check_ini_layout.py reference/speeduino.ini
+
+on:
+  pull_request:
+    paths:
+      - "reference/speeduino.ini"
+      - "tools/ini_lint/**"
+      - ".github/workflows/ini-layout.yml"
+  push:
+    branches: [master, main]
+    paths:
+      - "reference/speeduino.ini"
+      - "tools/ini_lint/**"
+
+jobs:
+  layout:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Check INI layout
+        # No third-party dependency: the script is stdlib-only on purpose, so
+        # this job cannot break because of supply-chain drift.
+        run: python tools/ini_lint/check_ini_layout.py reference/speeduino.ini
