@@ -1,96 +1,99 @@
-# Walkthrough — TunerStudio layout, second pass
+# Walkthrough — Accel tab + Fuel Calculations gauge view
 
-INI-only. No firmware change, no EEPROM change, nothing to flash.
+INI-only. No firmware change, nothing to flash. Tweaks the gauge INI, so
+reload the INI in TunerStudio.
 
-## What changed in this pass
+## What changed
 
-| Your feedback | Done |
+| Your request | Done |
 |---|---|
-| Secondary fuel/spark should sit directly below their parent tables, `VE Table` → `VE Table 2` | Done — folder gone, secondary tables sit right under their parents |
-| `VE Table` + `VE Table Options` should be one entry, options inside the table | Done for VE, VE Table 2 and Advance Table 2 |
-| Move Power Adders out of Boost, keep Boost clean for the rework | Done — Nitrous / WMI now under `&Outputs > Power Adders`; `&Boost` is two entries |
-| ASE before WUE in Warmup | Done |
-| Put back a tab with all the 3D maps | Done — `3D &Maps`, plain table views |
-| Idle settings: P and I unreachable, hard to read | Reworked — see below |
+| Dedicated Accel Enrichment tab | `&Accel` added, accel moved out of `&Fuel > Corrections` |
+| It will grow — plan for that | It is a top-level tab with room to add entries |
+| Merge idle/warmup if needed to make room | `&Warmup` folded into `&Idle`, ordered chronologically |
+| MS3-style gauge view of fuel calculations | `&Fuel > Fuel Calculations` |
 
-### `indexCard` failed — worth recording
+### The Fuel Calculations view
 
-The idle pilot confirmed `indexCard` is **not implemented**. What you saw is
-exactly its failure mode: all three child panels drawn at once in a cramped
-right column with the dialog broken around them. That matches the research
-finding that no shipping INI uses it.
-
-So idle now uses the idiom MS3 and rusEFI actually use — `border` + columns:
+Twenty gauges in four columns, plus an indicator strip:
 
 ```
-Idle Settings
-├── North  : idle control type, crank taper, idle-up input/output
-└── Center : [ PWM Idle ] [ Stepper Idle ] [ Closed loop Idle ]   side by side
+[Accel] [MAP Accel] [ASE ON] [WUE ON] [DFCO OFF] [O2 Active] [Running]
+ VE1          WUE              Fuel temp cor    MAP
+ VE2          Baro cor         Fuel pressure    Total cor
+ Req fuel     Air density cor  Flex cor         Pulse width 1
+ Dead time    EGO cor          Accel enrich     Pulse width 2
+ Stoich       AFR target       Total cor        Duty cycle
 ```
 
-P and I were unreachable because the content exceeded the dialog height and the
-title row pushed it down — TunerStudio clips rather than scrolls. Three columns
-side by side roughly a third the previous height. **If P and I are still cut
-off, tell me**: the next lever is dropping the `#Fast Idle` row and the
-"1.0 means 100%" banner, then reducing further.
+### One deliberate difference from MS3
 
-`Idle Up Settings` no longer has its own menu entry — it is inside Idle Control
-now.
+MS3 shows a separate gauge for each correction multiplier — including a
+"Fuel Pressure Correction" and a "Long Term Trim Correction" that Speeduino has
+no realtime channel for.
 
-## Please check
+I used a single **Total cor** gauge instead. `gammaEnrich` already aggregates
+every fuel correction, so this shows the net effect honestly. Inventing the
+missing channels would mean deriving numbers in the INI that firmware does not
+send — those gauges would display a plausible-looking wrong value, which is
+worse than not showing them. Every input to `gammaEnrich` is still individually
+visible (WUE, baro, air density, EGO, fuel temp, flex, accel).
 
-### 1. Idle Control — the one most likely to need another pass
+If you later add real firmware channels for fuel-pressure or trim corrections,
+say so and I will give each its own gauge.
 
-Open **Idle → Idle Control**.
+## Please check in TunerStudio
 
-- [ ] P, I and D are all visible and reachable.
-- [ ] The three columns sit side by side rather than stacked.
-- [ ] Idle-up settings appear underneath.
-- [ ] Nothing is clipped at the bottom.
+### 1. Accel tab
 
-### 2. Table dialogs — verify the `Center`/`East` split works
+- [ ] `Accel` appears in the menu bar.
+- [ ] It contains Acceleration Enrichment, and the AE graph still draws.
+- [ ] `Fuel → Corrections` no longer lists Acceleration Enrichment.
 
-Open **Fuel → VE Table**.
+### 2. Fuel Calculations
 
-- [ ] The table is on the left and **grows** when you widen the window.
-- [ ] An `Options` column sits on the right with *Multiply VE value by MAP
-      ratio* and the legacy options.
-- [ ] There is no separate `VE Table Options` entry in the Fuel menu any more.
+Open **Fuel → Fuel Calculations**.
 
-Then **Fuel → VE Table 2** (only shows if secondary fuel is enabled) and
-**Ignition → Ignition Advance Table 2**: same shape, options on the right.
+- [ ] Gauges render in four columns; nothing is cut off.
+- [ ] With the engine off most read 0 — that is expected, not a failure.
+- [ ] **`Stoich AFR` matches your configured stoich** (Engine → Engine
+      Constants → Stoichiometric ratio, default 14.7). This is the one gauge
+      built on a new derived channel, so it is the most likely to show
+      something odd. If it reads 0 or garbage, tell me.
 
-### 3. Menu order
+Note: with no ECU connected TunerStudio shows 0 for everything. The layout is
+still verifiable offline; the values are not.
 
-- [ ] **Fuel**: `VE Table`, `VE Table 2`, `Staged Injection` | AFR/Lambda/EGO | Corrections | Flex Fuel
-- [ ] **Ignition**: `Ignition Advance Table`, `Ignition Advance Table 2` | Spark Settings | Dwell | Spark Corrections | Sequential Trim | Knock | Rotary
-- [ ] **Warmup**: Cranking, Priming | **ASE, then WUE**
-- [ ] **Boost**: only `Boost Control` and `Boost Mode and Tables`
-- [ ] **Outputs → Power Adders**: Nitrous, Water-Methanol, WMI table
-- [ ] **3D &Maps**: all the tables as plain views, no options columns
+- [ ] **`Total cor`** should sit near 100% when running at operating
+      temperature with no enrichments active.
 
-### 4. Still fine?
+### 3. Idle tab (was Idle + Warmup)
 
-- [ ] No parse error, menu bar looks right, saved tune unchanged.
+- [ ] Order reads: Cranking Settings, Priming Pulsewidth | ASE, WUE | Idle
+      Control | Idle Curves | Idle Advance Settings.
+- [ ] P and I in Idle Control are now reachable (this was fixed in the previous
+      round — confirming it still holds).
 
-## Known trade-off I made
+### 4. Nothing else broke
 
-`3D &Maps` lists tables that also appear in their subsystem menu. That is a
-deliberate exception to the one-canonical-home rule, because you asked for the
-combined maps tab back and it is a common way to work. Only menu *entries*
-repeat — every table is still defined once, so nothing can drift. If it ever
-becomes confusing I can gate the per-subsystem copies behind a setting.
+- [ ] No parse error; saved tune still loads.
 
-## Diagnostics, if something looks wrong
+## Diagnostics
 
 ```cmd
 python tools/ini_lint/check_ini_layout.py reference/speeduino.ini
 ```
 
-Reports dangling menu targets, dangling `panel =` references, nested
-`groupMenu`, duplicates within a menu, malformed dialog headers, and anything
-that became unreachable. The `[Constants]` digest printed on every run must stay
-`6aedac05452d1188` — anything else means tune offsets moved, which would
-invalidate existing `.msq` files.
+This round I extended it because it let two mistakes through, both now caught
+automatically:
 
-Revert this pass with `git revert f0509c95`.
+- **`gauge =` references are validated.** Twenty new gauge references would
+  otherwise have been unchecked.
+- **The `[Constants]` digest is now an enforced baseline.** It also ignores
+  comments and normalises `= lastOffset`, since `lastOffset` always resolves to
+  the running byte position and cannot move an existing offset. Any real change
+  is a hard error rather than something to eyeball.
+
+Verified `cfb0d92d5e1553bf` is identical across all three commits of this work,
+which is the proof that no tune offset moved.
+
+Revert this round with `git revert 78949685`.
