@@ -12,34 +12,26 @@ reload the INI in TunerStudio.
 | Merge idle/warmup if needed to make room | `&Warmup` folded into `&Idle`, ordered chronologically |
 | MS3-style gauge view of fuel calculations | `&Fuel > Fuel Calculations` |
 
-### The Fuel Calculations view
-
-Twenty gauges in four columns, plus an indicator strip:
+### The Fuel Calculations view — now 5 wide
 
 ```
 [Accel] [MAP Accel] [ASE ON] [WUE ON] [DFCO OFF] [O2 Active] [Running]
- VE1          WUE              Fuel temp cor    MAP
- VE2          Baro cor         Fuel pressure    Total cor
- Req fuel     Air density cor  Flex cor         Pulse width 1
- Dead time    EGO cor          Accel enrich     Pulse width 2
- Stoich       AFR target       Total cor        Duty cycle
+ VE1           Stoich          Fuel temp cor   Total cor     Duty cycle
+ VE2           WUE             Flex cor        AFR target    MAP
+ Req fuel      Baro cor        EGO cor         Pulse width   MAP multiply
+ Dead time     Air density     Accel enrich    Pulse width 2 Fuel pressure
 ```
 
-### One deliberate difference from MS3
+5 columns x 4 gauges.
 
-MS3 shows a separate gauge for each correction multiplier — including a
-"Fuel Pressure Correction" and a "Long Term Trim Correction" that Speeduino has
-no realtime channel for.
+**Why it was 3 wide before:** `border` layouts only have West / Center / East —
+three side-by-side slots. I put the fourth column in `South`, which is a
+horizontal band, so its `yAxis` column stacked one gauge per row. That is the
+stack you saw. Fixed by nesting an `xAxis` of five columns inside `Center`.
 
-I used a single **Total cor** gauge instead. `gammaEnrich` already aggregates
-every fuel correction, so this shows the net effect honestly. Inventing the
-missing channels would mean deriving numbers in the INI that firmware does not
-send — those gauges would display a plausible-looking wrong value, which is
-worse than not showing them. Every input to `gammaEnrich` is still individually
-visible (WUE, baro, air density, EGO, fuel temp, flex, accel).
-
-If you later add real firmware channels for fuel-pressure or trim corrections,
-say so and I will give each its own gauge.
+**Also fixed:** the wall showed the same number twice. `totalCor` is a
+passthrough of `gammaEnrich`, so `totalCorGauge` and `gammaEnrichGauge` were
+both displaying the aggregate. Removed the duplicate; `gammaEnrichGauge` remains.
 
 ## Please check in TunerStudio
 

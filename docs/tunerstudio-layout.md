@@ -83,16 +83,53 @@ because cranking/afterstart/idle are one workflow.
 that produces the final pulsewidth, plus an indicator strip for accel flags,
 ASE, WUE, DFCO, O2 and running state.
 
-Built from four `yAxis` column dialogs inside a `border` dialog. To add a gauge,
-append one `gauge =` line to a column and keep the columns roughly balanced.
+### Why it is built the way it is
 
-The per-multiplier corrections are deliberately *not* all given their own gauge
-even though MS3 does. `gammaEnrich` already aggregates every fuel correction, so
-one **Total cor** gauge conveys the net effect honestly. Inventing separate
-channels would mean deriving numbers in the INI that do not exist in the
-realtime stream — a good way to display wrong values confidently. The inputs to
-gammaEnrich are still individually visible (WUE, baro, air density, EGO, fuel
-temp, flex, accel).
+`border` gives you **only three** side-by-side slots — West, Center, East.
+A common mistake is to assign a fourth column to South; South is a horizontal
+band, so a `yAxis` column placed there stacks one gauge per row instead of
+forming a grid. That produced a 3-wide wall with a stray vertical stack.
+
+The working structure nests an `xAxis` of five `yAxis` columns inside `Center`:
+
+```ini
+    dialog = fuelCalcCol1, "", yAxis
+        gauge = veGauge
+        ...
+    dialog = fuelCalcCols, "", xAxis
+        panel = fuelCalcCol1
+        panel = fuelCalcCol2
+        panel = fuelCalcCol3
+        panel = fuelCalcCol4
+        panel = fuelCalcCol5
+    dialog = fuelCalcs, "Fuel Calculations Summary", border
+        panel = fuelCalcIndicators, North
+        panel = fuelCalcCols, Center
+```
+
+Five columns of four gauges each. **Keep the columns equal height** — a short
+column makes the row look lopsided. Adding a gauge means appending one line to
+whichever column is shortest, then rebalancing.
+
+### Gauges must be distinct
+
+`totalCor` is a passthrough of `gammaEnrich`, so `totalCorGauge` and
+`gammaEnrichGauge` display the identical number. Only `gammaEnrichGauge` is on
+the wall. Watch for this when adding gauges: two names for the same channel is
+easy to do and looks like a bug.
+
+Note the linter checks that a `gauge =` reference resolves to a definition, but
+it cannot tell that two different gauge names are bound to the same variable.
+That still needs a human eye.
+
+### Why not one gauge per correction like MS3
+
+`gammaEnrich` already aggregates every fuel correction, so one gauge shows the
+net effect honestly. MS3's separate "Fuel Pressure Correction" and "Long Term
+Trim Correction" have no realtime channel in Speeduino — deriving them in the
+INI would display plausible but wrong values. Every input to `gammaEnrich` is
+still individually visible (WUE, baro, air density, fuel temp, flex, EGO,
+accel).
 
 Two display-only channels exist to support this: `stoichAFR` (because `stoich`
 is a `[Constants]` entry and cannot be used directly as a gauge variable) and
