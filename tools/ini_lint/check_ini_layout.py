@@ -56,6 +56,15 @@ from collections import defaultdict
 VALID_LAYOUTS = {"yaxis", "xaxis", "border", "indexcard"}
 SEPARATOR = "std_separator"
 
+# sha256 of the [Constants] section, first 16 hex chars, with:
+#   - comments and blank lines removed (they carry no offset information)
+#   - `<word> = lastOffset` normalised, because lastOffset always resolves to
+#     the running byte position, so declaring a locator with it moves nothing.
+# Anything else changing this digest means a real offset may have moved, which
+# silently invalidates existing .msq files. Update this constant only after
+# deliberately confirming that.
+EXPECTED_CONSTANTS_DIGEST = "cfb0d92d5e1553bf"
+
 # Sections that can define referenceable objects.
 SECTION_USERDEF = "userdefined"
 SECTION_CURVE = "curveeditor"
@@ -85,6 +94,8 @@ RE_CURVE = re.compile(r"^\s*curve\s*=\s*([^,\s]+)\s*,\s*(\"[^\"]*\"|\S*)", re.I)
 RE_TABLE = re.compile(r"^\s*table\s*=\s*([^,\s]+)\s*,\s*([^,\s]+)", re.I)
 RE_PANEL = re.compile(r"^\s*panel\s*=\s*([A-Za-z0-9_.]+)\s*(.*)$", re.I)
 RE_GAUGEREF = re.compile(r"^\s*gauge\s*=\s*([A-Za-z0-9_.]+)", re.I)
+# `panel = <name>` may legitimately point at an indicatorPanel or a [help] block
+# as well as a dialog, so those are collected as definitions too.
 RE_INDICATORPANEL = re.compile(r"^\s*indicatorPanel\s*=\s*([A-Za-z0-9_.]+)", re.I)
 RE_HELP = re.compile(r"^\s*help\s*=\s*([A-Za-z0-9_.]+)", re.I)
 
@@ -418,9 +429,10 @@ def check(path: str, strict: bool, verbose: bool) -> int:
         m = RE_GAUGEREF.match(line)
         if m:
             g = m.group(1)
-            if g not in known and not g.lower().startswith("std_"):
+            if not resolves(g):
                 rep.error("DLG-DANGLING-GAUGE",
-                          f"gauge = {g} not defined in [GaugeConfigurations]",
+                          f"gauge = {g} is not defined in "
+                          "[GaugeConfigurations] and not a std_* builtin",
                           ini.lineno(i))
 
     # ---- duplicate definitions (ignoring #if/#else branches) ---------------
@@ -512,6 +524,18 @@ def check(path: str, strict: bool, verbose: bool) -> int:
     rep.dump(show_info=verbose)
     print()
     n_err, n_warn = rep.count("ERROR"), rep.count("WARN")
+
+    # Offsets are the one thing that silently corrupts existing tunes if moved,
+    # so a changed digest is a hard failure unless explicitly acknowledged.
+    if digest != EXPECTED_CONSTANTS_DIGEST:
+        rep.error("CONSTANTS-DRIFT",
+                  f"[Constants] digest changed: expected "
+                  f"{EXPECTED_CONSTANTS_DIGEST}, got {digest}. An existing "
+                  "offset may have moved, which silently invalidates saved "
+                  ".msq files. Confirm the change is intentional, then update "
+                  "EXPECTED_CONSTANTS_DIGEST in this file.")
+        n_err += 1
+
     print(f"  {n_err} error(s), {n_warn} warning(s)")
     if n_err:
         print("\n  FAILED")
@@ -627,6 +651,11 @@ def constants_digest(ini: Ini) -> str:
 
     Any change here means tune offsets may have moved. Two INIs with the same
     digest have byte-identical constant declarations.
+
+    Comments and blank lines are stripped because they carry no offset
+    information. `lastOffset` is normalised to a constant token: it always
+    resolves to the running byte position, so writing `<name> = lastOffset`
+    for a new locator cannot move an existing offset.
     """
     buf = []
     inside = False
@@ -635,9 +664,11 @@ def constants_digest(ini: Ini) -> str:
             inside = ini.section_of[i] == SECTION_CONSTANTS
             continue
         if inside:
-            line = strip_comment(raw).rstrip()
-            if line.strip():
-                buf.append(line)
+            line = strip_comment(raw).strip()
+            if not line:
+                continue
+            line = re.sub(r"=\s*lastOffset\b", "= <lastOffset>", line)
+            buf.append(" ".join(line.split()))
     return hashlib.sha256("\n".join(buf).encode("utf-8")).hexdigest()[:16]
 
 
