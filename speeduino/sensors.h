@@ -103,6 +103,16 @@ void initialiseCLT(void);
 #define TPS_DOT_TIMER_BIT TPS_READ_TIMER_BIT
 #define TPS_DOT_MIN_PERIOD_US 1000U
 
+/** @brief How often the analog knock input is sampled.
+ *
+ * Knock detection is inherently a high-rate measurement - it is looking for a short mechanical
+ * ringing event, and a 33Hz sample interval (the previous rate) is far too coarse to catch it
+ * reliably. 200Hz is the fastest rate available from the main loop without perturbing the
+ * injector/ignition schedulers. A genuinely fast knock channel would need ISR-level sampling with a
+ * per-cylinder window, which is separate work (KNO-01/KNO-02 in the backlog).
+ */
+#define KNOCK_READ_TIMER_BIT BIT_TIMER_200HZ
+
 /** @brief Define the VSS (vehicle speed) read frequency. Feeds traction control, boost-by-speed and
  *  gear detection. The edge capture is in an ISR; this is only the derived value. */
 #define VSS_READ_TIMER_BIT BIT_TIMER_50HZ

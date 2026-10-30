@@ -633,7 +633,7 @@ static void setup_correctionKnockTiming(uint8_t mode) {
     currentStatus.knockCount = 1U;
     currentStatus.knockRetard = 0U;
     analogKnockReading = 0U;
-    BIT_CLEAR(currentStatus.LOOP_TIMER, BIT_TIMER_30HZ);
+    BIT_CLEAR(currentStatus.LOOP_TIMER, KNOCK_READ_TIMER_BIT);
 }
 
 static void test_correctionKnockTiming_digital_waits_for_threshold(void) {
@@ -694,7 +694,7 @@ static void test_correctionKnockTiming_analog_inactive_path_noop(void) {
     configPage10.knock_threshold = 200U;
     currentStatus.knockRetardActive = false;
     analogKnockReading = configPage10.knock_threshold;
-    BIT_SET(currentStatus.LOOP_TIMER, BIT_TIMER_30HZ);
+    BIT_SET(currentStatus.LOOP_TIMER, KNOCK_READ_TIMER_BIT);
     const uint32_t currMicros = 100000U;
 
     TEST_ASSERT_EQUAL(25, correctionKnockTiming(25, currMicros, stubGetAnalogKnock));
@@ -706,7 +706,7 @@ static void test_correctionKnockTiming_analog_inactive_path_starts_retard(void) 
     setup_correctionKnockTiming(KNOCK_MODE_ANALOG);
     configPage10.knock_threshold = 200U;
     analogKnockReading = configPage10.knock_threshold + 1U;
-    BIT_SET(currentStatus.LOOP_TIMER, BIT_TIMER_30HZ);
+    BIT_SET(currentStatus.LOOP_TIMER, KNOCK_READ_TIMER_BIT);
     const uint32_t currMicros = 100000U;
 
     TEST_ASSERT_EQUAL(22, correctionKnockTiming(25, currMicros, stubGetAnalogKnock));
@@ -742,7 +742,7 @@ static void test_correctionKnockTiming_analog_active_path_noop_below_threshold(v
     analogKnockReading = configPage10.knock_threshold - 1U;
     const uint32_t currMicros = 100000U;
     knockStartTime = currMicros;
-    BIT_SET(currentStatus.LOOP_TIMER, BIT_TIMER_30HZ);
+    BIT_SET(currentStatus.LOOP_TIMER, KNOCK_READ_TIMER_BIT);
 
     TEST_ASSERT_EQUAL(25, correctionKnockTiming(25, currMicros, stubGetAnalogKnock));
     TEST_ASSERT_TRUE(currentStatus.knockRetardActive);

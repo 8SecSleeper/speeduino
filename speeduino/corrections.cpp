@@ -398,7 +398,7 @@ static inline int16_t computeMapDot(void) {
 
     static constexpr uint32_t MAX_udiv_32_16 = UINT16_MAX; 
     static constexpr uint32_t MIN_udiv_32_16 = (MICROS_PER_SEC/UINT16_MAX)+1U; 
-    // Faster division path. Will almost always be taken when above idle - a 360° cycle time of 65535µS
+    // Faster division path. Will almost always be taken when above idle - a 360Â° cycle time of 65535ÂµS
     // equals 915 RPM.
     if ((mapDeltaT<=MAX_udiv_32_16) && (mapDeltaT>MIN_udiv_32_16)) {
       mapDOT = (int16_t)fast_div32_16(MICROS_PER_SEC, mapDeltaT) * (int16_t)mapChange; 
@@ -1204,8 +1204,10 @@ TESTABLE_STATIC int8_t correctionKnockTiming(int8_t advance, uint32_t currMicros
     }
     else
     {
-      //If not is not currently active, we read the analog pin every 30Hz
-      if( BIT_CHECK(currentStatus.LOOP_TIMER, BIT_TIMER_30HZ) ) 
+      // Analog knock is sampled at the knock rate, not 30Hz. Knock detection is inherently a
+      // high-rate measurement - a 33ms sampling window cannot reliably catch detonation. See
+      // KNOCK_READ_TIMER_BIT in sensors.h.
+      if( BIT_CHECK(currentStatus.LOOP_TIMER, KNOCK_READ_TIMER_BIT) )
       { 
         uint16_t tmpKnockReading = fnGetAnalogKnock();
 
