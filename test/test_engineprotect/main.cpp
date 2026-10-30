@@ -1038,7 +1038,7 @@ static void test_calcRollingCutRevolutions(void)
     engineProtection_test_context_t context;
     
     // Create a lookup of all possible configurations
-    // 2 stroke types Ã— 2 ignition types Ã— 2 fuel types = 8 combinations
+    // 2 stroke types × 2 ignition types × 2 fuel types = 8 combinations
     
     // Config 1: 2-stroke, seq ign, seq fuel -> 1
     context.page2.strokes = TWO_STROKE;
