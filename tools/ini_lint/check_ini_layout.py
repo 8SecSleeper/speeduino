@@ -63,7 +63,16 @@ SEPARATOR = "std_separator"
 # Anything else changing this digest means a real offset may have moved, which
 # silently invalidates existing .msq files. Update this constant only after
 # deliberately confirming that.
-EXPECTED_CONSTANTS_DIGEST = "cfb0d92d5e1553bf"
+EXPECTED_CONSTANTS_DIGEST = "80afb5c95af0706f"
+
+# Why this changed (from cfb0d92d5e1553bf):
+#   onboard_log_file_rate's 4th enum label went "30Hz" -> "100Hz" (the SD logger's
+#   highest rate now replaces the old 30 Hz slot rather than adding a 5th option, so the
+#   2-bit field is unchanged).
+# Verified offset-neutral: the field is still `bits, U08, 116, [4:5]` in both revisions,
+# no other field moved, and ochBlockSize is still 139. Only the display text differs, so no
+# .msq offset is affected - the digest cannot tell a label edit from an offset move, which
+# is why it is pinned and why this note is required.
 
 # Sections that can define referenceable objects.
 SECTION_USERDEF = "userdefined"
