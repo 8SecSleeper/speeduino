@@ -44,7 +44,8 @@ extern table2D_u8_u8_6 CLTAdvanceTable; ///< 6 bin ignition adjustment based on 
 static void setup_clt_advance_table(void) {
   initialiseCorrections();
   currentStatus.LOOP_TIMER = 0;
-  BIT_SET(currentStatus.LOOP_TIMER, BIT_TIMER_4HZ);
+  // CLT is read at 10Hz now; use the macro so this tracks CLT_READ_TIMER_BIT.
+  BIT_SET(currentStatus.LOOP_TIMER, CLT_READ_TIMER_BIT);
   TEST_DATA_P uint8_t bins[] = { 60, 70, 80, 90, 100, 110 };
   TEST_DATA_P uint8_t values[] = { 30, 25, 20, 15, 10, 5 };
   populate_2dtable_P(&CLTAdvanceTable, values, bins);
@@ -816,7 +817,7 @@ extern table2D_u8_u8_6 dwellVCorrectionTable; ///< 6 bin dwell voltage correctio
 
 static void setup_correctionsDwell(void) {
     initialiseCorrections();
-    BIT_SET(currentStatus.LOOP_TIMER, BIT_TIMER_4HZ);
+    BIT_SET(currentStatus.LOOP_TIMER, CLT_READ_TIMER_BIT);
 
     configPage4.sparkDur = 10;
     configPage2.perToothIgn = false;

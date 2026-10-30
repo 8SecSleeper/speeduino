@@ -282,7 +282,7 @@ struct statuses {
   
   volatile byte runSecs; /**< Counter of seconds since cranking commenced (Maxes out at 255 to prevent overflow) */
   volatile byte secl; /**< Counter incrementing once per second. Will overflow after 255 and begin again. This is used by TunerStudio to maintain comms sync */
-  volatile uint16_t loopsPerSecond; /**< A performance indicator showing the number of main loops that are being executed each second */ 
+  volatile uint32_t loopsPerSecond; /**< A performance indicator showing the number of main loops being executed each second. 32 bit because this part has enough headroom to exceed 65535 loops/s; the TunerStudio field is still U16, so reporting clamps it. */ 
   // TODO: remove this: only updated & read in logger
   uint16_t freeRAM;
   volatile uint32_t startRevolutions; /**< A counter for how many revolutions have been completed since sync was achieved. */

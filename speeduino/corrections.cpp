@@ -461,7 +461,10 @@ static inline int16_t computeTPSDOT(void) {
   int16_t tpsDOT = 0;
   // Check for only very small movement. This not only means we can skip the lookup, but helps reduce false triggering around 0-2% throttle openings
   if ((uint16_t)abs(tpsChange) > configPage2.taeMinChange) {
-    tpsDOT = (TPS_READ_FREQUENCY * tpsChange) / 2; //This is the % per second that the TPS has moved, adjusted for the 0.5% resolution of the TPS
+    // Uses the *dot* rate, not the TPS read rate - see TPS_DOT_FREQUENCY in sensors.h. The AE
+    // thresholds and the clamp below were all sized around a 30Hz sample interval, so tpsDOT must
+    // keep being differentiated over that interval even though TPS is now sampled at 200Hz.
+    tpsDOT = (TPS_DOT_FREQUENCY * tpsChange) / 2; //This is the % per second that the TPS has moved, adjusted for the 0.5% resolution of the TPS
 
     static constexpr int16_t TPS_DOT_MIN = -2550;
     static constexpr int16_t TPS_DOT_MAX = 2550;
@@ -474,7 +477,7 @@ static inline uint16_t correctionAccelModeTps(void) {
   uint16_t aeCorrection = currentStatus.AEamount;
 
   // No point in updating faster than the TPS is read
-  if (BIT_CHECK(currentStatus.LOOP_TIMER, TPS_READ_TIMER_BIT)) {
+  if (BIT_CHECK(currentStatus.LOOP_TIMER, TPS_DOT_TIMER_BIT)) {
     currentStatus.tpsDOT = computeTPSDOT();
 
     aeCorrection = correctionAccel(tpsOnTimeoutExpired, tpsShouldResetAe, tpsShouldStartAe, tpsComputeAe);

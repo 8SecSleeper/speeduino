@@ -14,6 +14,17 @@
 constexpr uint8_t LOG_ENTRY_SIZE = 138; /**< The size of the live data packet. This MUST match ochBlockSize setting in the ini file */
 
 byte getTSLogEntry(uint16_t byteNum);
+
+/** @brief The main-loop rate to report over the serial protocol.
+ *
+ * @ref statuses.loopsPerSecond is 32 bit because the loop can exceed 65535/s, but the
+ * TunerStudio field (`loopsPerSecond` in speeduino.ini) is a U16. Clamping here rather than
+ * writing the clamp back into currentStatus keeps the measured value intact for internal use -
+ * the old code did `currentStatus.loopsPerSecond = 60000U`, destroying the measurement.
+ *
+ * @return The rate, saturated to UINT16_MAX.
+ */
+uint16_t loopCountForReporting(void);
 int16_t getReadableLogEntry(uint16_t logIndex);
 float getReadableFloatLogEntry(uint16_t logIndex);
 uint8_t getLegacySecondarySerialLogEntry(uint16_t byteNum);

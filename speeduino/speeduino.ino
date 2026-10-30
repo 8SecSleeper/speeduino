@@ -70,12 +70,15 @@ constexpr table2D_u8_u8_10 idleTargetTable(&configPage6.iacBins, &configPage6.ia
 
 #ifndef UNIT_TEST // Scope guard for unit testing
 
-static uint16_t mainLoopCount = 0;
+static uint32_t mainLoopCount = 0;
+/** @brief Loops accumulated in the completed 100ms windows of the current second. See updateTimingTracking(). */
+static uint32_t mainLoopCountThisSecond = 0;
 
 void setup(void)
 {
   currentStatus.initialisationComplete = false; //Tracks whether the initialiseAll() function has run completely
   mainLoopCount = 0;
+  mainLoopCountThisSecond = 0;
   initialiseAll();
 }
 
@@ -127,21 +130,38 @@ static void onPowerSourceSwitch(uint8_t originalBatteryVoltage, const statuses &
   }
 }
 
+/** @brief Measure how many main loops per second actually run.
+ *
+ * The count is accumulated over 10 x 100ms windows rather than one 1-second window, and the
+ * per-second figure is the 100ms total x10. On the 600MHz Teensy 4.1 the loop rate comfortably
+ * exceeds the UINT16_MAX of the old single-second counter, so it used to saturate at 65535 and the
+ * "Main loop speed" gauge would sit pinned at its maximum - which tells you nothing about actual
+ * headroom. A 100ms window only has to hold loopsPerSecond/10, so the x10 result cannot overflow
+ * this 32-bit accumulator in practise.
+ *
+ * NB: currentStatus.loopsPerSecond is also readable mid-second (it holds the most recent completed
+ * window) so TunerStudio sees live movement instead of a value that only changes once a second.
+ */
 static void updateTimingTracking(void)
 {
-  if (BIT_CHECK(currentStatus.LOOP_TIMER, BIT_TIMER_1HZ)) 
-  { 
-    currentStatus.loopsPerSecond = mainLoopCount;
-    mainLoopCount = 0; 
-  }
-  else if(mainLoopCount < UINT16_MAX) 
-  { 
-    ++mainLoopCount; 
+  if (BIT_CHECK(currentStatus.LOOP_TIMER, BIT_TIMER_10HZ))
+  {
+    // 100ms elapsed: roll the window and publish. The most recent completed window x10 is the
+    // current estimate, refreshed 10x/second.
+    mainLoopCountThisSecond += mainLoopCount;
+    currentStatus.loopsPerSecond = (mainLoopCountThisSecond + mainLoopCount) * 10U;
+    mainLoopCount = 0;
+
+    if (BIT_CHECK(currentStatus.LOOP_TIMER, BIT_TIMER_1HZ))
+    {
+      // Full second boundary: the estimate is now exact, start a new second.
+      currentStatus.loopsPerSecond = mainLoopCountThisSecond * 10U;
+      mainLoopCountThisSecond = 0;
+    }
   }
   else
   {
-    // Very fast main loop, at least 65535 loop/sec!
-    // Do nothing.
+    ++mainLoopCount;
   }
 }
 

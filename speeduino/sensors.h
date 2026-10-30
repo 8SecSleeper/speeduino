@@ -89,6 +89,20 @@ void initialiseCLT(void);
 /** @brief Define the MAP sensor read frequency. Drives fuel load and MAPdot AE. Already correct. */
 #define MAP_READ_TIMER_BIT BIT_TIMER_1KHZ
 
+/** @brief The rate at which TPS *rate of change* (tpsDOT) is evaluated, in Hz.
+ *
+ * Deliberately decoupled from @ref TPS_READ_FREQUENCY. tpsDOT feeds acceleration enrichment, whose
+ * thresholds (configPage2.taeThresh / taeMinChange) and ±2550 %/s clamp were all sized for a 30Hz
+ * sample interval. Sampling TPS faster is what we want (flat shift, launch and every TPS-gated rule
+ * care about the *level*, not the rate), but deriving tpsDOT from two adjacent samples at 200Hz would
+ * raise its noise floor 6.7x - one LSB of TPS jitter would read as 100 %/s instead of 15 %/s and
+ * trip AE continuously.
+ *
+ * So: sample fast, differentiate over a 30Hz window. Changing this needs the AE thresholds revisited.
+ */
+#define TPS_DOT_FREQUENCY 30
+#define TPS_DOT_TIMER_BIT BIT_TIMER_30HZ
+
 /** @brief Define the VSS (vehicle speed) read frequency. Feeds traction control, boost-by-speed and
  *  gear detection. The edge capture is in an ISR; this is only the derived value. */
 #define VSS_READ_TIMER_BIT BIT_TIMER_50HZ

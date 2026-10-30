@@ -36,15 +36,18 @@ TESTABLE_INLINE_STATIC bool checkOilPressureLimit(const statuses &current, const
   {
     uint8_t oilLimit = table2D_getValue(&oilPressureProtectTable, current.RPMdiv100);
 
-    // Band the check on "the engine is turning and we have sync". Below that, oil pressure is
-    // legitimately zero and a configured protection delay must NOT start counting down - otherwise
-    // it would already be expired by the time the engine actually starts.
+    // Oil pressure is only meaningful while the engine is actually turning, and a cut is only
+    // meaningful if fuel/ignition are being scheduled. Below that the reading is legitimately zero,
+    // so a configured protection delay must NOT start counting down - otherwise it would already be
+    // expired by the time the engine actually starts, and the latched flag would prevent it starting.
     //
     // checkEngineProtection() used to be called only from inside the main loop's sync+RPM block, so
-    // this guard was implicit. It now runs outside that block (see roadmap §6B.2 - protection has to
-    // work on a 2-step and during stall recovery, which is exactly when RPM and sync are gone), so
-    // the condition has to be applied explicitly here instead.
-    const bool engineTurning = (current.RPM > 0U) && (current.decoder.getStatus().syncStatus != SyncStatus::None);
+    // this condition was implicit. It now runs outside that block (roadmap §6B.2 - protection has to
+    // act on a 2-step and during stall recovery), so it is applied explicitly here instead.
+    //
+    // Deliberately RPM-only rather than RPM+sync: a sync loss must not silently disable oil
+    // protection, and without sync there is nothing to cut anyway.
+    const bool engineTurning = (current.RPM > 0U);
 
     if(engineTurning && (current.oilPressure < oilLimit))
     {

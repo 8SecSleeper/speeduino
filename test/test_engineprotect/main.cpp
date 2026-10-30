@@ -127,7 +127,9 @@ struct engineProtection_test_context_t
         resetInternalState();
         setup_oil_protect_table();
         current.oilPressure = oilPressureProtectTable.values[0]-10; // below table min
-        current.setRpm( 0U);
+        // Oil protection now requires the engine to be turning: below that the reading is
+        // legitimately zero and the delay must not start counting down (see checkOilPressureLimit).
+        current.setRpm( 800U);
         page6.engineProtectType = PROTECT_CUT_IGN;
         page10.oilPressureProtEnbl = 1;
         page10.oilPressureEnable = 1;
@@ -1036,7 +1038,7 @@ static void test_calcRollingCutRevolutions(void)
     engineProtection_test_context_t context;
     
     // Create a lookup of all possible configurations
-    // 2 stroke types × 2 ignition types × 2 fuel types = 8 combinations
+    // 2 stroke types Ã— 2 ignition types Ã— 2 fuel types = 8 combinations
     
     // Config 1: 2-stroke, seq ign, seq fuel -> 1
     context.page2.strokes = TWO_STROKE;

@@ -1011,6 +1011,9 @@ static void setup_TAE()
 
   currentStatus.LOOP_TIMER = 0;
   BIT_SET(currentStatus.LOOP_TIMER, TPS_READ_TIMER_BIT);
+  // tpsDOT is differentiated on its own (slower) timer bit - see TPS_DOT_FREQUENCY in sensors.h.
+  // TPS is sampled at 200Hz but the AE thresholds and the +/-2550 clamp assume a 30Hz interval.
+  BIT_SET(currentStatus.LOOP_TIMER, TPS_DOT_TIMER_BIT);
   configPage2.aeMode = AE_MODE_TPS; //Set AE to TPS
 
   TEST_DATA_P uint8_t bins[] = { 0, 8, 22, 97 };

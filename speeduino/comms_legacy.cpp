@@ -106,8 +106,8 @@ void legacySerialCommand(void)
       break;
 
     case 'c': //Send the current loops/sec value
-      primarySerial.write(lowByte(currentStatus.loopsPerSecond));
-      primarySerial.write(highByte(currentStatus.loopsPerSecond));
+      primarySerial.write(lowByte(loopCountForReporting()));
+      primarySerial.write(highByte(loopCountForReporting()));
       break;
 
     case 'd': // Send a CRC32 hash of a given page

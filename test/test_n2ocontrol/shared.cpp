@@ -5,6 +5,11 @@
 
 void setup_n20_tune(uint8_t enableMode)
 {
+    // nitrousControl() owns a 100Hz gate (a stage cut is a safety action - see roadmap §6B P2), so the
+    // timer bit must be set for the controller to run at all.
+    currentStatus.LOOP_TIMER = 0;
+    BIT_SET(currentStatus.LOOP_TIMER, BIT_TIMER_100HZ);
+
     configPage10.n2o_arming_pin = TEST_N2OARM_PIN;
     configPage10.n2o_enable = enableMode;
     configPage10.n2o_maxAFR = 100;

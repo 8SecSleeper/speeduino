@@ -12,6 +12,12 @@
 #include "scheduler_fuel_controller.h"
 #include "src/controllers/progammableIO/programmableIOControl.h"
 
+uint16_t loopCountForReporting(void)
+{
+  const uint32_t loops = currentStatus.loopsPerSecond;
+  return (loops > UINT16_MAX) ? UINT16_MAX : (uint16_t)loops;
+}
+
 static byte setStatusBit(byte status, uint8_t index, bool bit)
 {
   BIT_WRITE(status, index, bit);
@@ -217,10 +223,10 @@ byte getTSLogEntry(uint16_t byteNum)
     case 25: statusValue = currentStatus.TPS; break; // TPS (0% to 100%)
     
     case 26: 
-      statusValue = lowByte(currentStatus.loopsPerSecond); 
+      statusValue = lowByte(loopCountForReporting()); 
       break;
     case 27: 
-      statusValue = highByte(currentStatus.loopsPerSecond); 
+      statusValue = highByte(loopCountForReporting()); 
       break;
     
     case 28: 
@@ -406,8 +412,7 @@ int16_t getReadableLogEntry(uint16_t logIndex)
     case 21: statusValue = currentStatus.TPS; break; // TPS (0% to 100%)
     
     case 22: 
-      if(currentStatus.loopsPerSecond > 60000U) { currentStatus.loopsPerSecond = 60000U;}
-      statusValue = currentStatus.loopsPerSecond; 
+      statusValue = lowByte(loopCountForReporting());
       break;
     
     case 23: 
@@ -585,8 +590,8 @@ uint8_t getLegacySecondarySerialLogEntry(uint16_t byteNum)
     case 22: statusValue = (uint8_t)(currentStatus.tpsDOT / 10); break; //TPS DOT
     case 23: statusValue = currentStatus.advance; break;
     case 24: statusValue = currentStatus.TPS; break; // TPS (0% to 100%)
-    case 25: statusValue = lowByte(currentStatus.loopsPerSecond); break;
-    case 26: statusValue = highByte(currentStatus.loopsPerSecond); break;
+    case 25: statusValue = lowByte(loopCountForReporting()); break;
+    case 26: statusValue = highByte(loopCountForReporting()); break;
 
     case 27: currentStatus.freeRAM = freeRam(); statusValue = lowByte(currentStatus.freeRAM); break; //(byte)((currentStatus.loopsPerSecond >> 8) & 0xFF); break;
     case 28: currentStatus.freeRAM = freeRam(); statusValue = highByte(currentStatus.freeRAM); break;
