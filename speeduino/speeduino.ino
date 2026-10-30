@@ -71,14 +71,11 @@ constexpr table2D_u8_u8_10 idleTargetTable(&configPage6.iacBins, &configPage6.ia
 #ifndef UNIT_TEST // Scope guard for unit testing
 
 static uint32_t mainLoopCount = 0;
-/** @brief Loops accumulated in the completed 100ms windows of the current second. See updateTimingTracking(). */
-static uint32_t mainLoopCountThisSecond = 0;
 
 void setup(void)
 {
   currentStatus.initialisationComplete = false; //Tracks whether the initialiseAll() function has run completely
   mainLoopCount = 0;
-  mainLoopCountThisSecond = 0;
   initialiseAll();
 }
 
@@ -132,36 +129,24 @@ static void onPowerSourceSwitch(uint8_t originalBatteryVoltage, const statuses &
 
 /** @brief Measure how many main loops per second actually run.
  *
- * The count is accumulated over 10 x 100ms windows rather than one 1-second window, and the
- * per-second figure is the 100ms total x10. On the 600MHz Teensy 4.1 the loop rate comfortably
- * exceeds the UINT16_MAX of the old single-second counter, so it used to saturate at 65535 and the
- * "Main loop speed" gauge would sit pinned at its maximum - which tells you nothing about actual
- * headroom. A 100ms window only has to hold loopsPerSecond/10, so the x10 result cannot overflow
- * this 32-bit accumulator in practise.
+ * Publishes the rate from the 100ms window that has just completed, scaled by 10. A 100ms window
+ * holds hundreds of loops on this part, so x10 is accurate to ~1% while refreshing 10x/second -
+ * which is what makes the gauge usable for spotting headroom.
  *
- * NB: currentStatus.loopsPerSecond is also readable mid-second (it holds the most recent completed
- * window) so TunerStudio sees live movement instead of a value that only changes once a second.
+ * Do NOT accumulate a full second and then multiply by 10: that reports 10x the true rate, because a
+ * 1-second total is already a per-second figure. (An earlier version of this function did exactly
+ * that, on top of adding the window to the accumulator twice, and pinned the gauge at its maximum -
+ * which made a fast loop look like an unmeasurable one.)
  */
 static void updateTimingTracking(void)
 {
+  ++mainLoopCount;
+
   if (BIT_CHECK(currentStatus.LOOP_TIMER, BIT_TIMER_10HZ))
   {
-    // 100ms elapsed: roll the window and publish. The most recent completed window x10 is the
-    // current estimate, refreshed 10x/second.
-    mainLoopCountThisSecond += mainLoopCount;
-    currentStatus.loopsPerSecond = (mainLoopCountThisSecond + mainLoopCount) * 10U;
+    // 100ms window complete: loops * 10 == loops per second.
+    currentStatus.loopsPerSecond = mainLoopCount * 10U;
     mainLoopCount = 0;
-
-    if (BIT_CHECK(currentStatus.LOOP_TIMER, BIT_TIMER_1HZ))
-    {
-      // Full second boundary: the estimate is now exact, start a new second.
-      currentStatus.loopsPerSecond = mainLoopCountThisSecond * 10U;
-      mainLoopCountThisSecond = 0;
-    }
-  }
-  else
-  {
-    ++mainLoopCount;
   }
 }
 
@@ -269,7 +254,7 @@ BEGIN_LTO_ALWAYS_INLINE(void) loop(void)
 
     // Engine protection runs here, outside the sync+RPM block, so that it can act on a 2-step/bump box
     // or during stall recovery - states where RPM and/or sync are absent. At 200Hz it is still the
-    // fastest control path in the loop. See roadmap §6B P5 / §6B.2.
+    // fastest control path in the loop. See roadmap Â§6B P5 / Â§6B.2.
     if (BIT_CHECK(currentStatus.LOOP_TIMER, BIT_TIMER_200HZ))
     {
       currentStatus.engineProtect = checkEngineProtection(currentStatus, configPage4, configPage6, configPage9, configPage10);
@@ -342,7 +327,7 @@ BEGIN_LTO_ALWAYS_INLINE(void) loop(void)
     #ifdef SD_LOGGING
       // Highest logging rate, on its own top-level gate. NOT nested inside a slower block: a nested
       // timer bit only fires when both counters happen to coincide, which is the exact bug this
-      // branch set out to fix (roadmap §6B P3). Writing to SD can block the main loop for
+      // branch set out to fix (roadmap Â§6B P3). Writing to SD can block the main loop for
       // milliseconds on a block flush, so this is the rate to be suspicious of - check
       // loopsPerSecond before trusting it during a run.
       if( (configPage13.onboard_log_file_rate == SD_LOGGER_RATE_100HZ)
@@ -354,7 +339,7 @@ BEGIN_LTO_ALWAYS_INLINE(void) loop(void)
     auxChannelControl(currentStatus, configPage9);
 
     // Nitrous stage control. Latency critical (a stage cut is a safety action), so the module owns a
-    // 100Hz gate and is called every pass rather than from the 4Hz block below. See roadmap §6B P2.
+    // 100Hz gate and is called every pass rather than from the 4Hz block below. See roadmap Â§6B P2.
     nitrousControl();
 
     if (BIT_CHECK(currentStatus.LOOP_TIMER, BIT_TIMER_4HZ))
