@@ -247,25 +247,33 @@ BEGIN_LTO_ALWAYS_INLINE(void) loop(void)
     boostControl(currentStatus, configPage2, configPage4, configPage6, configPage9, configPage10, configPage15);
     fanControl(currentStatus, configPage2, configPage6, configPage15);
 
+    // Engine protection runs here, outside the sync+RPM block, so that it can act on a 2-step/bump box
+    // or during stall recovery - states where RPM and/or sync are absent. At 200Hz it is still the
+    // fastest control path in the loop. See roadmap §6B P5 / §6B.2.
+    if (BIT_CHECK(currentStatus.LOOP_TIMER, BIT_TIMER_200HZ))
+    {
+      currentStatus.engineProtect = checkEngineProtection(currentStatus, configPage4, configPage6, configPage9, configPage10);
+    }
+
     if(BIT_CHECK(currentStatus.LOOP_TIMER, BIT_TIMER_50HZ)) //50 hertz
     {
       #if defined(NATIVE_CAN_AVAILABLE)
       sendCANBroadcast(50);
       #endif
     }
-    if(BIT_CHECK(currentStatus.LOOP_TIMER, BIT_TIMER_30HZ)) //30 hertz
+    // VVT and water/methanol injection moved from 30Hz to 100Hz. VVT closed loop is a cam phasing PID
+    // that was visibly lazy on transients, and a proportional WMI valve needs more than 30Hz.
+    if(BIT_CHECK(currentStatus.LOOP_TIMER, BIT_TIMER_100HZ))
     {
-      //VVT may eventually need to be synced with the cam readings (ie run once per cam rev) but for now run at 30Hz
+      //VVT may eventually need to be synced with the cam readings (ie run once per cam rev) but for now run at 100Hz
       vvtControl(currentStatus, configPage4, configPage6, configPage10);
       //Water methanol injection
       wmiControl(currentStatus, configPage10);
-      
+    }
+    if(BIT_CHECK(currentStatus.LOOP_TIMER, BIT_TIMER_30HZ)) //30 hertz
+    {
       #if defined(NATIVE_CAN_AVAILABLE)
       sendCANBroadcast(30);
-      #endif
-
-      #ifdef SD_LOGGING
-        if(configPage13.onboard_log_file_rate == SD_LOGGER_RATE_30HZ) { writeSDLogEntry(); }
       #endif
 
       //AVR units process secondary serial requests at a fixed 30Hz
@@ -289,10 +297,17 @@ BEGIN_LTO_ALWAYS_INLINE(void) loop(void)
       //And check whether the tooth log buffer is ready
       if(toothHistoryIndex > _countof(toothHistory)) { currentStatus.isToothLog1Full = true; }
     }
+    // Programmable I/O is evaluated at 100Hz so rules react within ~10ms instead of up to 100ms.
+    // The activation/output delay counters tick once per call, and TunerStudio presents "Activation
+    // Delay" in units of 0.1s (see reference/speeduino.ini). They are therefore driven by a separate
+    // flag that still ticks at exactly 10Hz - raising the evaluation rate must not silently make every
+    // tuner's already-configured delay fire ten times early.
+    if(BIT_CHECK(currentStatus.LOOP_TIMER, BIT_TIMER_100HZ))
+    {
+      programmableIOControl(configPage13, BIT_CHECK(currentStatus.LOOP_TIMER, BIT_TIMER_10HZ));
+    }
     if(BIT_CHECK(currentStatus.LOOP_TIMER, BIT_TIMER_10HZ)) //10 hertz
     {
-      programmableIOControl(configPage13);
-      
       // Air conditioning control
       airConControl(currentStatus, configPage15);
 
@@ -304,11 +319,26 @@ BEGIN_LTO_ALWAYS_INLINE(void) loop(void)
         if(configPage13.onboard_log_file_rate == SD_LOGGER_RATE_10HZ) { writeSDLogEntry(); }
       #endif
     }
+    #ifdef SD_LOGGING
+      // Highest logging rate, on its own top-level gate. NOT nested inside a slower block: a nested
+      // timer bit only fires when both counters happen to coincide, which is the exact bug this
+      // branch set out to fix (roadmap §6B P3). Writing to SD can block the main loop for
+      // milliseconds on a block flush, so this is the rate to be suspicious of - check
+      // loopsPerSecond before trusting it during a run.
+      if( (configPage13.onboard_log_file_rate == SD_LOGGER_RATE_100HZ)
+        && BIT_CHECK(currentStatus.LOOP_TIMER, BIT_TIMER_100HZ) )
+      {
+        writeSDLogEntry();
+      }
+    #endif
     auxChannelControl(currentStatus, configPage9);
+
+    // Nitrous stage control. Latency critical (a stage cut is a safety action), so the module owns a
+    // 100Hz gate and is called every pass rather than from the 4Hz block below. See roadmap §6B P2.
+    nitrousControl();
+
     if (BIT_CHECK(currentStatus.LOOP_TIMER, BIT_TIMER_4HZ))
     {
-      nitrousControl();
-
       //Lookup the current target idle RPM. This is aligned with coolant and so needs to be calculated at the same rate CLT is read
       if( (configPage2.idleAdvEnabled != IDLEADVANCE_MODE_OFF) || (configPage6.iacAlgorithm != IAC_ALGORITHM_NONE) )
       {
@@ -351,8 +381,9 @@ BEGIN_LTO_ALWAYS_INLINE(void) loop(void)
 
     // Run idlecontrol every loop for stepper idle...
     if (isStepperIac(configPage6)
-    // ...or to be run at 10Hz to align with the idle taper resolution of 0.1s
-    || BIT_CHECK(currentStatus.LOOP_TIMER, BIT_TIMER_10HZ))
+    // ...or at 50Hz for PWM modes. The idle taper inside idleControl() still increments on the 10Hz
+    // bit, because configPage2.idleTaperTime is presented to the tuner in units of 0.1s.
+    || BIT_CHECK(currentStatus.LOOP_TIMER, BIT_TIMER_50HZ))
     {
       idleControl(); 
     }
@@ -386,7 +417,7 @@ BEGIN_LTO_ALWAYS_INLINE(void) loop(void)
           }
         }
       ignBypassControl(currentStatus);
-      currentStatus.engineProtect = checkEngineProtection(currentStatus, configPage4, configPage6, configPage9, configPage10);
+      //NOTE: checkEngineProtection() now runs at 200Hz outside this sync+RPM block (see above).
       //END SETTING ENGINE STATUSES
       //-----------------------------------------------------------------------------------------------------
 

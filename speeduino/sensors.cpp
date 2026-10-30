@@ -853,7 +853,7 @@ static inline void updateOilPressure(void)
   currentStatus.oilPressure = getOilPressure();
 }
 
-BEGIN_LTO_ALWAYS_INLINE(void) readPolledSensors(byte loopTimer)
+BEGIN_LTO_ALWAYS_INLINE(void) readPolledSensors(loop_timer_t loopTimer)
 {
   static constexpr 
   struct {
@@ -870,10 +870,10 @@ BEGIN_LTO_ALWAYS_INLINE(void) readPolledSensors(byte loopTimer)
 #if defined(ANALOG_ISR)
     {BIT_TIMER_200HZ, enableAnalogIsr},
 #endif
-    {BIT_TIMER_10HZ, readSpeed},
-    {BIT_TIMER_10HZ, readGear},
-    {BIT_TIMER_4HZ, updateFuelPressure},
-    {BIT_TIMER_4HZ, updateOilPressure},
+    {VSS_READ_TIMER_BIT, readSpeed},
+    {GEAR_READ_TIMER_BIT, readGear},
+    {FUEL_PRESSURE_READ_TIMER_BIT, updateFuelPressure},
+    {OIL_PRESSURE_READ_TIMER_BIT, updateOilPressure},
   };
   
   auto readSensor = [loopTimer](uint8_t i) __attribute__((always_inline)) {

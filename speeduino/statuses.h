@@ -17,14 +17,30 @@ struct config4;
 
 using byte = uint8_t;
 
-constexpr uint8_t BIT_TIMER_1HZ = 0;
-constexpr uint8_t BIT_TIMER_4HZ = 1;
-constexpr uint8_t BIT_TIMER_10HZ = 2;
-constexpr uint8_t BIT_TIMER_15HZ = 3;
-constexpr uint8_t BIT_TIMER_30HZ = 4;
-constexpr uint8_t BIT_TIMER_50HZ = 5;
-constexpr uint8_t BIT_TIMER_200HZ = 6;
-constexpr uint8_t BIT_TIMER_1KHZ = 7;
+/**
+ * @brief The type of @ref statuses.LOOP_TIMER and the timer mask it is latched from.
+ *
+ * This is 16 bit because the scheduled rate ladder needs more than 8 slots. When widening or
+ * re-ordering, note that @ref BIT_TIMER_* values are *bit indices*, not rates: every
+ * `#if <x>_READ_FREQUENCY == <n>` guard in sensors.h must use the bit index, not the Hz value.
+ *
+ * @note Never change an existing bit index without also changing @ref TPS_READ_FREQUENCY and
+ * the matching guard in sensors.h. The two are coupled deliberately so a mismatch fails the build.
+ */
+using loop_timer_t = uint16_t;
+
+/** @brief Per-second periodic timer bits. Each bit is set by @ref oneMSInterval when its period expires. */
+constexpr uint8_t BIT_TIMER_1HZ    = 0;
+constexpr uint8_t BIT_TIMER_4HZ    = 1;
+constexpr uint8_t BIT_TIMER_10HZ   = 2;
+constexpr uint8_t BIT_TIMER_15HZ   = 3;
+constexpr uint8_t BIT_TIMER_30HZ   = 4;
+constexpr uint8_t BIT_TIMER_50HZ   = 5;
+constexpr uint8_t BIT_TIMER_100HZ  = 6;
+constexpr uint8_t BIT_TIMER_200HZ  = 7;
+constexpr uint8_t BIT_TIMER_1KHZ   = 8;
+constexpr uint8_t BIT_TIMER_20HZ   = 9;
+constexpr uint8_t BIT_TIMER_40HZ   = 10;
 
 /** @brief The current status of scheduler channel cuts */
 enum class SchedulerCutStatus : uint8_t
@@ -391,7 +407,7 @@ struct statuses {
 
   decoder_t decoder; ///< The current decoder
 
-  uint8_t LOOP_TIMER; ///< The timer flags currently in effect
+  loop_timer_t LOOP_TIMER; ///< The timer flags currently in effect
 
   vvtStatus_t vvt1;
   vvtStatus_t vvt2;

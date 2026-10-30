@@ -35,7 +35,18 @@ TESTABLE_INLINE_STATIC bool checkOilPressureLimit(const statuses &current, const
     && (page10.oilPressureEnable == true))
   {
     uint8_t oilLimit = table2D_getValue(&oilPressureProtectTable, current.RPMdiv100);
-    if(current.oilPressure < oilLimit)
+
+    // Band the check on "the engine is turning and we have sync". Below that, oil pressure is
+    // legitimately zero and a configured protection delay must NOT start counting down - otherwise
+    // it would already be expired by the time the engine actually starts.
+    //
+    // checkEngineProtection() used to be called only from inside the main loop's sync+RPM block, so
+    // this guard was implicit. It now runs outside that block (see roadmap §6B.2 - protection has to
+    // work on a 2-step and during stall recovery, which is exactly when RPM and sync are gone), so
+    // the condition has to be applied explicitly here instead.
+    const bool engineTurning = (current.RPM > 0U) && (current.decoder.getStatus().syncStatus != SyncStatus::None);
+
+    if(engineTurning && (current.oilPressure < oilLimit))
     {
       //Check if this is the first time we've been below the limit
       if ((oilProtEndTime == 0U) && !oilProtTimerStarted)

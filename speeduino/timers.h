@@ -20,8 +20,9 @@ Hence we will preload the timer with 131 cycles to leave 125 until overflow (1ms
 #define TIMERS_H
 
 #include <stdint.h>
+#include "statuses.h"
 
-uint8_t getAndClearTimerMask(void);
+loop_timer_t getAndClearTimerMask(void);
 void oneMSInterval(void);
 void initialiseTimers(void);
 

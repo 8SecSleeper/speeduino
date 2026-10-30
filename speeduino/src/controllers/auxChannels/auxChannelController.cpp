@@ -158,8 +158,11 @@ TESTABLE_STATIC void auxChannelControl(statuses &current, const config9 &page9, 
 // LCOV_EXCL_START
 void auxChannelControl(statuses &current, const config9 &page9)
 {
+    // Aux channels carry VSS and CAN inputs, so the old 4Hz gate made anything fed from them unusable
+    // (a CAN-sourced value would update once every 250ms). Raised to 40Hz. The main loop no longer
+    // gates this, so the rate is authoritative here. See roadmap §6B.2.
     if(_auxState.enabled
-    && BIT_CHECK(current.LOOP_TIMER, BIT_TIMER_4HZ))
+    && BIT_CHECK(current.LOOP_TIMER, BIT_TIMER_40HZ))
     {
         auxChannelControl(current, page9, sendCancommand, readAnalogSensor, digitalRead);
     }

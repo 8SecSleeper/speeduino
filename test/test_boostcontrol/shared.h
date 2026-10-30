@@ -27,6 +27,10 @@ struct test_context_t
     void setup_boost_enabled(void)
     {
         current.rotationStatus = EngineRotationStatus::Running;
+        // All timer bits at once. NOTE: test_context_t::boostControl() calls boostControlCore()
+        // directly, so it bypasses the rate gate entirely - which is exactly why the old nested
+        // 30Hz/10Hz bug in boostControl() (roadmap §6B P3) was invisible to this suite. The gate
+        // itself is covered separately by test_boostControl_gate_runs_on_200Hz in test_boostcontrol.cpp.
         current.LOOP_TIMER = 0xFF;
         current.MAP = 50;
         page6.boostEnabled = true;

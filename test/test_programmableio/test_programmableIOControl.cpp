@@ -12,7 +12,10 @@ using namespace programmableIOControl_details;
 extern state_t state;
 
 // Forward declare the testable functions
+// Two-argument overload retains the original "1 call == 1 delay tick" semantics.
 extern void programmableIOControl(const config13& page13, int16_t (*getData)(uint16_t index));
+// Three-argument overload lets the main loop evaluate rules fast while ticking delays at 10Hz.
+extern void programmableIOControl(const config13& page13, int16_t (*getData)(uint16_t index), bool tickDelays);
 extern int16_t programmableIOGetData(uint16_t index, byte (*pGetLogEntry)(uint16_t byteNum));
 extern bool applyOutputTimeLimit(const processing_channel_t& channel, bool ruleActive);
 

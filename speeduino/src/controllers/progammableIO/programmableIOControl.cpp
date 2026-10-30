@@ -32,19 +32,28 @@ TESTABLE_INLINE_STATIC bool isRuleActive(const rule_t& rule, const processing_ch
   return applyOutputTimeLimit(channel, rule.evaluate(state, pGetData));
 }
 
-static inline void processChannelActive(processing_channel_t &channel)
+/**
+ * @param tickDelays When false the rule condition is evaluated but the activation/output delay
+ *        counters are not advanced. Those counters are expressed in units of 0.1s to the user (see
+ *        reference/speeduino.ini) and must therefore tick at exactly 10Hz, independent of how often
+ *        the rules themselves are evaluated. See the main loop call site.
+ */
+static inline void processChannelActive(processing_channel_t &channel, bool tickDelays)
 {
-  channel.incrementActivationDelay();
+  if (tickDelays) { channel.incrementActivationDelay(); }
   if (channel.activationDelayExpired())
   {
-    if (channel._channel_state.isOutputActive && !channel.outputDelayExpired()) { ++channel._channel_state.outputDelayCount; }
+    if (channel._channel_state.isOutputActive && !channel.outputDelayExpired()) 
+    { 
+      if (tickDelays) { ++channel._channel_state.outputDelayCount; }
+    }
     channel._channel_state.updateStatus(true);
   }
 }
 
-static inline void processChannelInactive(processing_channel_t &channel)
+static inline void processChannelInactive(processing_channel_t &channel, bool tickDelays)
 {
-  channel.incrementOutputDelay();
+  if (tickDelays) { channel.incrementOutputDelay(); }
   if (channel.outputDelayExpired())
   {
     if(channel.limitType==LimitingType::Min) { channel._channel_state.outputDelayCount = 0; }
@@ -54,7 +63,7 @@ static inline void processChannelInactive(processing_channel_t &channel)
   channel._channel_state.activationDelayCount = 0;
 }
 
-static inline void processChannel(channel_state_t &channel, const config13& page13, getDataFn pGetData)
+static inline void processChannel(channel_state_t &channel, const config13& page13, getDataFn pGetData, bool tickDelays)
 {
   if ( channel.isPinValid() )
   {
@@ -62,11 +71,11 @@ static inline void processChannel(channel_state_t &channel, const config13& page
     processing_channel_t processingChannel(page13, channel);
     if (isRuleActive(rule, processingChannel, pGetData))
     {
-      processChannelActive(processingChannel);
+      processChannelActive(processingChannel, tickDelays);
     }
     else
     {
-      processChannelInactive(processingChannel);
+      processChannelInactive(processingChannel, tickDelays);
     }
   }
 }
@@ -76,18 +85,26 @@ static inline void processChannel(channel_state_t &channel, const config13& page
  * Use programmableIOGetData() to get 2 vars to compare.
  * Skip all programmable I/O:s where output pin is set 0 (meaning: not programmed).
  */
-TESTABLE_INLINE_STATIC void programmableIOControl(const config13& page13, getDataFn pGetData)
+TESTABLE_INLINE_STATIC void programmableIOControl(const config13& page13, getDataFn pGetData, bool tickDelays)
 {
   for (auto& channel_state: state.channels)
   {
-    processChannel(channel_state, page13, pGetData);
+    processChannel(channel_state, page13, pGetData, tickDelays);
   }
 }
 
-// LCOV_EXCL_START
-void programmableIOControl(const config13& page13)
+/** Default overload: evaluates and ticks delays together (1 call == 1 delay tick).
+ * Kept so existing callers/tests keep their original semantics.
+ */
+TESTABLE_INLINE_STATIC void programmableIOControl(const config13& page13, getDataFn pGetData)
 {
-  programmableIOControl(page13, programmableIOGetData);
+  programmableIOControl(page13, pGetData, true);
+}
+
+// LCOV_EXCL_START
+void programmableIOControl(const config13& page13, bool tickDelays)
+{
+  programmableIOControl(page13, programmableIOGetData, tickDelays);
 }
 // LCOV_EXCL_STOP
 

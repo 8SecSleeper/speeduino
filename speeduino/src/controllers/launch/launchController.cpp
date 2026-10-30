@@ -105,9 +105,9 @@ TESTABLE_STATIC void updateLaunchFlagsCore(statuses &current, const config2 &pag
 // LCOV_EXCL_START
 void updateLaunchAndFlatShift(statuses &current, const config2 &page2, const config6 &page6, const config10 &page10, const config15 &page15)
 {
-  if (BIT_CHECK(current.LOOP_TIMER, BIT_TIMER_10HZ)) 
-  {
-    updateLaunchFlagsCore(current, page2, page6, page10, page15);
-  }
+  // Deliberately ungated: launch and flat shift are latency-critical, so the caller runs this every
+  // loop. Previously this re-tested BIT_TIMER_10HZ *here* even though the main loop already called it
+  // unconditionally, which silently capped a drag launch at 10Hz (~100ms) of lag. See roadmap §6B P1.
+  updateLaunchFlagsCore(current, page2, page6, page10, page15);
 }
 // LCOV_EXCL_STOP

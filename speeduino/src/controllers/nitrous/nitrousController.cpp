@@ -48,6 +48,11 @@ void __attribute__((optimize("Os"))) initialiseNitrous(void)
 
 void nitrousControl(void)
 {
+  // Nitrous stage cuts are a safety action, so this is deliberately polled fast instead of being
+  // driven from the 4Hz block it used to live in (up to 250ms of latency on a lean/overboost cut).
+  // See roadmap §6B P2. Gated here rather than at the call site so the rate travels with the module.
+  if (!BIT_CHECK(currentStatus.LOOP_TIMER, BIT_TIMER_100HZ)) { return; }
+
   currentStatus.nitrousActive = false;
   currentStatus.nitrous_status = NITROUS_OFF; //Reset the current state
 

@@ -837,7 +837,12 @@ struct cmpOperation {
 constexpr uint8_t SD_LOGGER_RATE_1HZ = 0;
 constexpr uint8_t SD_LOGGER_RATE_4HZ = 1;
 constexpr uint8_t SD_LOGGER_RATE_10HZ = 2;
-constexpr uint8_t SD_LOGGER_RATE_30HZ = 3;
+/** @brief Highest logging rate. Replaces the old 30Hz slot rather than adding a 5th option, so the
+ *  2-bit field (and therefore every field offset after it) is unchanged.
+ *  @warning Writing to SD can block the main loop for milliseconds on a block flush, so this rate
+ *  perturbs ignition/injection schedule recalculation. Validate with `loopsPerSecond` before
+ *  relying on it during a run. */
+constexpr uint8_t SD_LOGGER_RATE_100HZ = 3;
 
 /**
 Page 13 - Programmable outputs logic rules.
@@ -863,7 +868,7 @@ struct config13 : public config_page_t {
 
   byte onboard_log_csv_separator :2;  //";", ",", "tab", "space"  
   byte onboard_log_file_style    :2;  // "Disabled", "CSV", "Binary", "INVALID" 
-  byte onboard_log_file_rate     :2;  // "1Hz", "4Hz", "10Hz", "30Hz" 
+  byte onboard_log_file_rate     :2;  // "1Hz", "4Hz", "10Hz", "100Hz" (3 - see SD_LOGGER_RATE_*)
   byte onboard_log_filenaming    :2;  // "Overwrite", "Date-time", "Sequential", "INVALID" 
   byte onboard_log_storage       :2;  // "sd-card", "INVALID", "INVALID", "INVALID" ;In the future maybe an onboard spi flash can be used, or switch between SDIO vs SPI sd card interfaces.
   byte onboard_log_trigger_boot  :1;  // "Disabled", "On boot"

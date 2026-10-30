@@ -20,6 +20,45 @@ static void setup_preboost_state(statuses &current)
   boostOutput.targetDuty = 77;
 }
 
+/**
+ * @brief Regression test for roadmap §6B P3.
+ *
+ * boostControl() used to gate on BIT_TIMER_30HZ and then nest a BIT_TIMER_10HZ check inside it for
+ * the closed-loop target/PID update. LOOP_TIMER is cleared on every main-loop pass and the 30Hz/10Hz
+ * bits come from independent 33ms/100ms counters, so the two bits only ever appeared in the same
+ * mask every lcm(33,100)=3300ms -> closed-loop boost recomputed roughly once every 3.3 seconds.
+ *
+ * The rest of this suite could not catch that because test_context_t::boostControl() calls
+ * boostControlCore() directly, bypassing the gate. So exercise the real entry point with explicit
+ * masks here: closed loop must update on the 200Hz tick and must NOT update without it.
+ */
+static void test_boostControl_gate_uses_200Hz_only(void)
+{
+  auto context = setup_boost_tune(false, VSS_MODE_OFF, CLOSED_LOOP_BOOST, 0);
+  context.setup_boost_enabled();
+
+  // Drive the inactive path so the expected outcome is unambiguous: boostControlCore() zeroes
+  // boostTarget/boostDuty/flexBoostCorrection whenever boost is not active.
+  context.page6.boostEnabled = false;
+  context.current.rotationStatus = EngineRotationStatus::Running;
+
+  // 30Hz + 10Hz set, 200Hz clear. This is precisely the mask the old nested gate could never
+  // satisfy, and it must now be a no-op.
+  context.current.LOOP_TIMER = 0U;
+  BIT_SET(context.current.LOOP_TIMER, BIT_TIMER_30HZ);
+  BIT_SET(context.current.LOOP_TIMER, BIT_TIMER_10HZ);
+  setup_preboost_state(context.current);
+  boostControl(context.current, context.page2, context.page4, context.page6, context.page9, context.page10, context.page15);
+  TEST_ASSERT_EQUAL(77, context.current.boostTarget); // untouched: gate closed
+  TEST_ASSERT_EQUAL(77, context.current.boostDuty);
+
+  // 200Hz set: the controller must run.
+  BIT_SET(context.current.LOOP_TIMER, BIT_TIMER_200HZ);
+  boostControl(context.current, context.page2, context.page4, context.page6, context.page9, context.page10, context.page15);
+  TEST_ASSERT_EQUAL(0, context.current.boostTarget); // ran: core zeroed the inactive path
+  TEST_ASSERT_EQUAL(0, context.current.boostDuty);
+}
+
 static void assert_boost_off(statuses &current)
 {
   TEST_ASSERT_EQUAL(0, current.flexBoostCorrection);
@@ -370,6 +409,7 @@ void testBoostControl(void)
   {
     RUN_TEST_P(test_boost_disabled);
     RUN_TEST_P(test_boostPIDUpdates);
+    RUN_TEST_P(test_boostControl_gate_uses_200Hz_only);
     RUN_TEST_P(test_cl_boost_no_external_vss);
     run_ol_tests();
     run_cl_tests();

@@ -49,37 +49,64 @@ void initialiseTPS(void);
 /** @brief Initial reading of the coolant sensor, primarily to make sure the priming pulsewidth is correct */
 void initialiseCLT(void);
 
-#define TPS_READ_FREQUENCY  30 //ONLY VALID VALUES ARE 15 or 30!!!
+/** @brief How often the TPS is sampled, in Hz. Valid values are 15, 30 or 200. */
+#define TPS_READ_FREQUENCY  200
 
-/** @brief Define the TPS sensor read frequency. */
-#if TPS_READ_FREQUENCY==30
-#define TPS_READ_TIMER_BIT BIT_TIMER_30HZ
-#elif TPS_READ_FREQUENCY==15
+/** @brief Define the TPS sensor read frequency.
+ *
+ * @note These must be numeric literals, not the BIT_TIMER_* constants: those are `constexpr` and are
+ * invisible to the preprocessor, so `#if` cannot test them. If a BIT_TIMER_* bit is ever renumbered,
+ * update the mapping below by hand - the `#error` branch exists so a forgotten update fails loudly.
+ */
+#if TPS_READ_FREQUENCY==15
 #define TPS_READ_TIMER_BIT BIT_TIMER_15HZ
+#elif TPS_READ_FREQUENCY==30
+#define TPS_READ_TIMER_BIT BIT_TIMER_30HZ
+#elif TPS_READ_FREQUENCY==200
+#define TPS_READ_TIMER_BIT BIT_TIMER_200HZ
 #else
-#error
+#error "TPS_READ_FREQUENCY must be 15, 30 or 200 (Hz)"
 #endif
 
-/** @brief Define the coolant sensor read frequency. */
-#define CLT_READ_TIMER_BIT BIT_TIMER_4HZ
+/** @brief Define the coolant sensor read frequency.
+ *  Thermal mass means this only needs to track WUE, idle target, fan and protection. */
+#define CLT_READ_TIMER_BIT BIT_TIMER_10HZ
 
-/** @brief Define the IAT sensor read frequency. */
-#define IAT_READ_TIMER_BIT BIT_TIMER_4HZ
+/** @brief Define the IAT sensor read frequency. Feeds the air-density correction. */
+#define IAT_READ_TIMER_BIT BIT_TIMER_10HZ
 
-/** @brief Define the O2 sensor read frequency. */
-#define O2_READ_TIMER_BIT BIT_TIMER_30HZ
+/** @brief Define the O2 sensor read frequency. Drives closed-loop lambda, AFR protection, autotune.
+ *  The wideband controller itself is the limit here, not the ECU. */
+#define O2_READ_TIMER_BIT BIT_TIMER_50HZ
 
-/** @brief Define the battery sensor read frequency. */
-#define BAT_READ_TIMER_BIT BIT_TIMER_4HZ
+/** @brief Define the battery sensor read frequency. Drives injector dead-time and dwell correction,
+ *  so an alternator load step should be visible rather than 250ms late. */
+#define BAT_READ_TIMER_BIT BIT_TIMER_10HZ
 
-/** @brief Define the baro sensor read frequency. */
-#define BARO_READ_TIMER_BIT BIT_TIMER_1HZ
+/** @brief Define the baro sensor read frequency. Only needs to track weather. */
+#define BARO_READ_TIMER_BIT BIT_TIMER_4HZ
 
-/** @brief Define the MAP sensor read frequency. */
+/** @brief Define the MAP sensor read frequency. Drives fuel load and MAPdot AE. Already correct. */
 #define MAP_READ_TIMER_BIT BIT_TIMER_1KHZ
 
+/** @brief Define the VSS (vehicle speed) read frequency. Feeds traction control, boost-by-speed and
+ *  gear detection. The edge capture is in an ISR; this is only the derived value. */
+#define VSS_READ_TIMER_BIT BIT_TIMER_50HZ
+
+/** @brief Define the gear-detection read frequency. Must be usable as a table axis, so it cannot
+ *  chatter the way a 10Hz update does. */
+#define GEAR_READ_TIMER_BIT BIT_TIMER_50HZ
+
+/** @brief Define the fuel-pressure read frequency. This is a protection input; 250ms is far too slow
+ *  to catch a failing pump under load. */
+#define FUEL_PRESSURE_READ_TIMER_BIT BIT_TIMER_20HZ
+
+/** @brief Define the oil-pressure read frequency. Protection input - must not be as slow as a
+ *  coolant sensor. */
+#define OIL_PRESSURE_READ_TIMER_BIT BIT_TIMER_20HZ
+
 /** @brief Read the sensors that are polled at every loop. This includes the TPS, MAP, CLT, IAT and O2 sensors */
-void readPolledSensors(byte loopTimer);
+void readPolledSensors(loop_timer_t loopTimer);
 
 /** @brief Initialize the MAP calculation & Baro values */
 void initialiseMAPBaro(void);

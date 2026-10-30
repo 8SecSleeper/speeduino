@@ -16,12 +16,72 @@ This fork exists to run Speeduino on **one** board. Do not spend effort on other
 | PlatformIO env | `teensy41` |
 | Serial port | `COM11` @ 115200 |
 | Pin mapping ID | **55** (DropBear) |
-| Connectivity | USB only. No SD, RTC or knock module has been validated. |
+| Connectivity | USB. **SD and RTC are compiled in by default** — see §1A. Knock: one conditioned input. |
 
-Other environments (`megaatmega2560`, `black_F407VE-*`, `teensy35`, `native_base`, Bear Cub /
-board 56) are **compile-only**. Keep them compiling, but do not test on them, do not add
-features for them, and do not "fix" them speculatively. If a change breaks them at compile
-time, fix the build; otherwise leave them alone.
+**No other environment is a target.** `megaatmega2560`, `black_F407VE-*`, `teensy35`, Bear Cub /
+board 56 and the rest are **not supported and are not required to compile**. Do not spend effort on
+them, do not gate new code behind `#if defined(...)` checks for them, and do not treat a break in
+them as a build failure to fix. If a change breaks one of them, that is acceptable and expected.
+
+The single exception is `native_base` / `native_code_coverage`, which are the **unit-test host**
+environments, not target boards. They are worth keeping buildable so `test/` stays usable, but they
+are not a release gate and they need a host `gcc`/`g++` that is not installed on every dev machine.
+
+**The only build that must pass is `teensy41`.**
+
+---
+
+## 1A. Board capabilities — do not under-state these
+
+An earlier version of this file said *"No SD, RTC or knock module has been validated."* That was
+misleading and caused wasted work. The facts:
+
+| Capability | Reality | Evidence |
+|---|---|---|
+| **RTC** | **Compiled in.** Needs a coin cell fitted on the board. | `board_teensy41.h:70` `#define RTC_ENABLED`; `:72` `RTC_LIB_H "TimeLib.h"` |
+| **SD card** | **Compiled in, via SDIO not SPI.** Fastest Teensy mode. | `board_teensy41.h:71` `#define SD_LOGGING`; `:73` `SD_CONFIG SdioConfig(FIFO_SDIO)` |
+| **Knock** | One conditioned analog/digital input. No multi-channel. | `config10.knock_mode`, single `knock_pin` |
+
+**Consequences:**
+
+- Do not treat "logging" as absent. The limitation is **rate** (max 30 Hz, `config13.onboard_log_file_rate`), not hardware.
+- SD is a legitimate home for bulk data — multi-tune libraries, high-rate logs, reference curves. It is **not** a substitute for EEPROM on the boot path (SD can be absent, unformatted, or slow).
+- Pins **42–47 are reserved for the SD card** (`board_teensy41.h:78-88` `pinIsReserved`). Do not assign them.
+
+### 1A.1 Pin 34 is multiplexed by design, not buggy
+
+DropBear documents pin 34 ("Spare Digital In 2") as *"12 V or ground switching digital input. Can be
+used for VSS, Idle Up etc. This is also the default input for a secondary Cam input if using dual
+VVT."* It therefore appears as **both** `pinVSS` and `pinTrigger3` in the DropBear mapping
+(`pinMapping.cpp:1231,1238`). The two uses are **mutually exclusive** — that is intentional. Do not
+"fix" it. Pin 35 is likewise `pinWMIEmpty` by default and is available as a second speed input.
+
+### 1A.2 Speed inputs are user-assignable
+
+`vssPin` is a 6-bit field exposed in TunerStudio accepting **any pin 3–53 or A8–A15**
+(`speeduino.ini:457`, applied at `init.cpp:345`). Adding a second or third speed input is
+**firmware work, not a board rev**: the limitation is that `sensors.cpp` has one `vssPulse` ISR and
+one `vssTimes[VSS_SAMPLES]` ring buffer. Planned arrangement: **pin 34 = rear, pin 35 = front**.
+
+### 1A.3 The CPU is not the constraint the original code assumes
+
+The firmware was written for AVR where main-loop cycles were scarce, and many control loops are
+polled at 4–10 Hz to save them. On a 600 MHz Cortex-M7 that is an anachronism. `timers.cpp` already
+generates **200 Hz and 1 kHz** timer bits (`:65`, `:83`) that almost nothing consumes — the main
+loop only tests 1/4/10/15/30/50 Hz.
+
+**Important:** config pages (`configPage2/4/6`, …) are **plain RAM** (`globals.cpp:36-38`), loaded
+from EEPROM at boot and written only on burn. A faster control loop therefore **never touches the
+shared SPI bus** and cannot corrupt an MC33810 transfer. The only flash paths are
+`readFlashEeprom`/`writeFlashEeprom` (`board_teensy41.cpp:236,242`), both already parked.
+
+The real limit on raising loop rates is **injector/coil ISR jitter** — `TMR1–TMR4` reach
+`SPI.transfer16()` in interrupt context. Set rates from actuator/sensor time constants, not from
+CPU headroom, and measure `loopsPerSecond` (`statuses.h:269`, already instrumented) before going
+above ~200 Hz.
+
+See `docs/DRAG_ECU_FEATURE_GAP_AND_ROADMAP.md` §6A–§6B for the full timing analysis and a
+per-sensor / per-loop rate audit.
 
 `pio` is **not on PATH**. Always use the full path:
 
@@ -139,11 +199,11 @@ those absolute offsets byte for byte.
 |---|---|
 | **Supported, tested** | DropBear v2 + Teensy 4.1, SPI flash storage |
 | **Not supported** | Arduino Mega / any 4 KB EEPROM board, devices without onboard flash |
-| **Compile-only** | Other envs — keep them building, do not design for them |
+| **Compile-only** | None. Other envs are not built and are not a support target |
 
 Do not dilute a feature with `#if defined(ARDUINO_AVR_MEGA2560)` guards, reduced table sizes,
-or "small flash mode" workarounds to accommodate boards we have chosen not to support. Keep
-the other envs *compiling*; do not constrain behaviour for them.
+or "small flash mode" workarounds to accommodate boards we have chosen not to support. Do not
+constrain behaviour for other boards at all — if a change breaks their build, that is accepted.
 
 ### What this means in practice
 
@@ -177,14 +237,14 @@ the other envs *compiling*; do not constrain behaviour for them.
 
    | Where | Constant | Today |
    |---|---|---|
-   | `board_teensy41.cpp` | `EmulatedEEPROMMconfig` sectors | **133** |
-   | `tools/flash_probe` | `FORMAT_SECTORS` | 255 |
-   | `tools/eeprom_readback` | `SECTORS_TO_CHECK` | 133 |
+   | `board_teensy41.cpp` | `EmulatedEEPROMMconfig` sectors | **768** (`:120`) |
+   | `tools/flash_probe` | `FORMAT_SECTORS` | **768** (`src/main.cpp:527`) |
+   | `tools/eeprom_readback` | `SECTORS_TO_CHECK` | **768** (`src/main.cpp:34`) |
 
-   `flash_probe` formats more than the firmware needs, which is harmless (a superset). But if
-   you raise the firmware above the probe's value you will under-format, `hasMagicNumbers()`
-   will fail, and the board will run on internal EEPROM without obvious error. Update all
-   three, re-run `F`, then confirm `verify_storage.py` reports `backend : SPI Flash`.
+   All three currently agree at 768. If they drift you under-format, `hasMagicNumbers()` fails,
+   and the board silently runs on internal EEPROM. If you raise the firmware above the probe's
+   value you will under-format. Update all three, re-run `K` (never `F` on a board holding a
+   tune), then confirm `verify_storage.py` reports `backend : SPI Flash`.
 
 6. **`uint16_t` is fine** up to 65,535 addresses, so it spans the full 23,808-byte ceiling.
    What breaks is code that *assumes* `0xFFF`:
@@ -242,7 +302,7 @@ MC33810 injector/ignition drivers share that same bus.**
    requires a reflash to recover. It is safe during init. For runtime diagnostics, use the
    SPI flash or serial.
 
-5. **Never format on the boot path.** Formatting erases 133 sectors (~6 s) before USB
+5. **Never format on the boot path.** Formatting erases 768 sectors (~35 s at ~45 ms each) before USB
    enumerates. Formatting is a manual PC step: `tools/flash_probe`, key `F`.
 
 ---
@@ -346,7 +406,8 @@ rest of the gotchas.
 
 ## 8. Before you call it done
 
-- [ ] `teensy41` builds clean (and other envs still compile if you touched shared code).
+- [ ] `teensy41` builds clean. Other environments are **not** a gate — do not chase their build
+      errors.
 - [ ] `verify_storage.py` passes with `backend : SPI Flash`.
 - [ ] Data survives a reboot if you changed anything in the write path.
 - [ ] `parkSharedSpiDevices()` is still called around every flash access.

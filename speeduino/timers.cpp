@@ -27,31 +27,39 @@ Timers are typically low resolution (Compared to Schedulers), with maximum frequ
 
 volatile uint16_t lastRPM_100ms; //Need to record this for rpmDOT calculation
 volatile byte loop5ms;
+volatile byte loop10ms;
 volatile byte loop20ms;
 volatile byte loop33ms;
+volatile byte loop50ms;
 volatile byte loop66ms;
 volatile byte loop100ms;
 volatile byte loop250ms;
 volatile int loopSec;
 
+/** @brief Sub-tick divider that derives the 40Hz bit from the 100Hz tick. See oneMSInterval(). */
+static uint8_t loop40msSubTick;
+
 void __attribute__((optimize("Os"))) initialiseTimers(void)
 {
   lastRPM_100ms = 0;
   loop5ms = 0;
+  loop10ms = 0;
   loop20ms = 0;
   loop33ms = 0;
+  loop50ms = 0;
   loop66ms = 0;
   loop100ms = 0;
   loop250ms = 0;
   loopSec = 0;
+  loop40msSubTick = 0;
 }
 
-TESTABLE_STATIC volatile uint8_t TIMER_mask;
+TESTABLE_STATIC volatile loop_timer_t TIMER_mask;
 
-uint8_t getAndClearTimerMask(void)
+loop_timer_t getAndClearTimerMask(void)
 {
   ATOMIC() {
-    uint8_t mask = TIMER_mask;
+    loop_timer_t mask = TIMER_mask;
     TIMER_mask = 0U;
     return mask;
   }
@@ -66,8 +74,10 @@ void oneMSInterval(void)
 
   //Increment Loop Counters
   loop5ms++;
+  loop10ms++;
   loop20ms++;
   loop33ms++;
+  loop50ms++;
   loop66ms++;
   loop100ms++;
   loop250ms++;
@@ -83,6 +93,21 @@ void oneMSInterval(void)
     BIT_SET(TIMER_mask, BIT_TIMER_200HZ);
   }
 
+  //100Hz loop
+  if(loop10ms == 10)
+  {
+    loop10ms = 0; //Reset counter
+    BIT_SET(TIMER_mask, BIT_TIMER_100HZ);
+
+    //40Hz loop - 1000ms is not a multiple of 25ms, so dividing the 100Hz tick by 3 yields
+    //exactly 40Hz over a 1.2s window (and it never drifts, unlike a 25ms saturating counter).
+    if (++loop40msSubTick >= 3U)
+    {
+      loop40msSubTick = 0;
+      BIT_SET(TIMER_mask, BIT_TIMER_40HZ);
+    }
+  }
+
   //50Hz loop
   if(loop20ms == 20)
   {
@@ -95,6 +120,13 @@ void oneMSInterval(void)
   {
     loop33ms = 0;
     BIT_SET(TIMER_mask, BIT_TIMER_30HZ);
+  }
+
+  //20Hz loop
+  if (loop50ms == 50)
+  {
+    loop50ms = 0;
+    BIT_SET(TIMER_mask, BIT_TIMER_20HZ);
   }
 
   //15Hz loop

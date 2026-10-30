@@ -211,16 +211,15 @@ TESTABLE_STATIC void boostControlCore(statuses &current, const config2 &page2, c
     }
     else // CLOSED_LOOP_BOOST
     {
-      // LCOV_EXCL_BR_START
-      // The timer check *MUST* be a multiple of the boost control interval
-      // otherwise branch will NEVER be taken.
-      if( BIT_CHECK(current.LOOP_TIMER, BIT_TIMER_10HZ) )
-      // LCOV_EXCL_BR_STOP
-      { 
-        current.flexBoostCorrection = getFlexCorrection(current, page2);
-        current.boostTarget = getBoostTarget(current, page2, page9);
-        current.boostDuty = convertTargetToDuty(current, page2, page6, page10);
-      } 
+      // No inner rate gate here. There used to be a BIT_TIMER_10HZ check nested inside the outer
+      // BIT_TIMER_30HZ gate in boostControl(). LOOP_TIMER is cleared every main-loop pass, and the
+      // 30Hz/10Hz bits come from independent 33ms/100ms counters, so the two only ever appeared in
+      // the same mask every lcm(33,100)=3300ms. In other words closed-loop boost recomputed its
+      // target once every ~3.3 SECONDS, not 10x/second. The caller now owns a single 200Hz gate and
+      // this runs on every call. See roadmap §6B P3.
+      current.flexBoostCorrection = getFlexCorrection(current, page2);
+      current.boostTarget = getBoostTarget(current, page2, page9);
+      current.boostDuty = convertTargetToDuty(current, page2, page6, page10);
 
       // Only enables boost control above baro pressure or above user defined threshold 
       // (User defined level is usually set to boost with wastegate actuator only boost level)
@@ -245,7 +244,10 @@ TESTABLE_STATIC void boostControlCore(statuses &current, const config2 &page2, c
 // LCOV_EXCL_START
 void boostControl(statuses &current, const config2 &page2, const config4 &page4, const config6 &page6, const config9 &page9, const config10 &page10, const config15 &page15)
 {
-  if( BIT_CHECK(current.LOOP_TIMER, BIT_TIMER_30HZ) )
+  // Single 200Hz gate for both open and closed loop. The PID runs inside convertTargetToDuty(), so
+  // open and closed loop now share one rate - previously closed loop was additionally throttled by a
+  // nested 10Hz check that could only coincide with this one every 3.3 seconds (see §6B P3).
+  if( BIT_CHECK(current.LOOP_TIMER, BIT_TIMER_200HZ) )
   {
     boostControlCore(current, page2, page4, page6, page9, page10, page15);
   }
