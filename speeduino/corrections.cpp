@@ -456,27 +456,36 @@ static inline uint16_t tpsComputeAe(void) {
 
 static inline int16_t computeTPSDOT(void) {
   //Get the TPS rate change
-  const int16_t tpsChange = (int16_t)currentStatus.TPS - (int16_t)currentStatus.TPSlast;
-  
+  const int32_t tpsChange = (int32_t)currentStatus.TPS - (int32_t)currentStatus.TPSlast;
+
   int16_t tpsDOT = 0;
   // Check for only very small movement. This not only means we can skip the lookup, but helps reduce false triggering around 0-2% throttle openings
   if ((uint16_t)abs(tpsChange) > configPage2.taeMinChange) {
-    // Uses the *dot* rate, not the TPS read rate - see TPS_DOT_FREQUENCY in sensors.h. The AE
-    // thresholds and the clamp below were all sized around a 30Hz sample interval, so tpsDOT must
-    // keep being differentiated over that interval even though TPS is now sampled at 200Hz.
-    tpsDOT = (TPS_DOT_FREQUENCY * tpsChange) / 2; //This is the % per second that the TPS has moved, adjusted for the 0.5% resolution of the TPS
+    // Measured interval between the last two TPS samples, floored so a back-to-back read cannot make
+    // the divisor (near) zero. See TPS_DOT_MIN_PERIOD_US in sensors.h.
+    const uint32_t deltaTime = getTPSDeltaTime();
+    const uint32_t deltaT = (deltaTime > TPS_DOT_MIN_PERIOD_US) ? deltaTime : TPS_DOT_MIN_PERIOD_US;
 
-    static constexpr int16_t TPS_DOT_MIN = -2550;
-    static constexpr int16_t TPS_DOT_MAX = 2550;
-    tpsDOT = constrain(tpsDOT, TPS_DOT_MIN, TPS_DOT_MAX);
-  } 
+    // Sample rate in Hz (<= 1000 given the floor above). Worst case 1000 * 200 = 200000, so this
+    // cannot overflow int32_t. TPS is in 0.5% units, hence the /2 to get %/s.
+    const int32_t rate = (int32_t)(MICROS_PER_SEC / deltaT);
+    const int32_t tpsDotUnclamped = (rate * tpsChange) / 2;
+
+    static constexpr int32_t TPS_DOT_MIN = -2550;
+    static constexpr int32_t TPS_DOT_MAX = 2550;
+    tpsDOT = (int16_t)constrain(tpsDotUnclamped, TPS_DOT_MIN, TPS_DOT_MAX);
+  }
   return tpsDOT;
 }
 
 static inline uint16_t correctionAccelModeTps(void) {
   uint16_t aeCorrection = currentStatus.AEamount;
 
-  // No point in updating faster than the TPS is read
+  // Runs on the TPS sample (200Hz) rather than a slower gate. tpsDOT itself is a true rate of change
+  // now - it divides by the *measured* sample interval - so it is meaningful at this rate, and the
+  // AE start/taper/expiry checks all use micros() internally. Evaluating here gives an AE cut 5ms of
+  // granularity instead of 33ms, which matters for a drag launch where a rich spike shows up
+  // immediately on a throttle stab.
   if (BIT_CHECK(currentStatus.LOOP_TIMER, TPS_DOT_TIMER_BIT)) {
     currentStatus.tpsDOT = computeTPSDOT();
 

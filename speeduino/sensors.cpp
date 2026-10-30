@@ -520,8 +520,45 @@ static inline bool isCTPSSensorActive(void) {
   return digitalRead(pinNumbers.pinCTPS); //Inverted mode (5v activates closed throttle position sensor)
 }
 
+/** @brief Time in µS between the last 2 TPS readings.
+ *
+ * Used to derive tpsDOT as a true rate of change. Previously tpsDOT was computed as
+ * `(TPS_READ_FREQUENCY * tpsChange) / 2`, i.e. it *assumed* the sample interval rather than measuring
+ * it. That made the value silently rate-dependent: raising the TPS read frequency scaled every
+ * rate-of-change by the same factor, so the +/-2550 clamp saturated and one LSB of ADC noise read as
+ * a large throttle stab, triggering acceleration enrichment continuously.
+ *
+ * @note Measured, not assumed, so the AE thresholds in configPage2 (taeThresh/taeMinChange) and the
+ * clamp keep their meaning at any sample rate. TPS_DOT_MIN_PERIOD_US bounds the divisor against
+ * back-to-back reads.
+ */
+static uint32_t tpsLastReadTime = 0U;
+static uint32_t tpsDeltaTime = 0U;
+
+/** @brief Get the time in µS between the last 2 TPS readings */
+uint32_t getTPSDeltaTime(void) {
+  return tpsDeltaTime;
+}
+
+#if defined(UNIT_TEST)
+/** @brief Override the measured TPS sample interval. Unit tests only.
+ *
+ * computeTPSDOT() divides by the measured interval, so a test that assigns currentStatus.TPS by hand
+ * (rather than calling readTPS()) has no interval to divide by. This lets such a test state the
+ * interval it means instead of depending on a build-time frequency.
+ */
+void setTPSSampleIntervalUs(uint32_t interval) {
+  tpsDeltaTime = interval;
+  tpsLastReadTime = micros();
+}
+#endif
+
 static inline void readTPS(uint8_t tpsADC)
 {
+  const uint32_t now = micros();
+  tpsDeltaTime = now - tpsLastReadTime;
+  tpsLastReadTime = now;
+
   currentStatus.TPSlast = currentStatus.TPS;
   currentStatus.tpsADC = tpsADC;
 

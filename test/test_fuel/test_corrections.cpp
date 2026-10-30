@@ -1003,6 +1003,12 @@ static void setup_AE(void) {
   reset_AE();
 }
 
+extern uint16_t correctionAccel(void);
+
+// tpsDOT divides by the measured TPS sample interval; this test hook declares the interval to use.
+// (Declared inline here because the sensors.h declaration is guarded by UNIT_TEST, which this
+// build does not define.)
+extern void setTPSSampleIntervalUs(uint32_t interval);
 extern table2D_u8_u8_4 taeTable; ///< 4 bin TPS Acceleration Enrichment map (2D)
 
 static void setup_TAE()
@@ -1011,9 +1017,11 @@ static void setup_TAE()
 
   currentStatus.LOOP_TIMER = 0;
   BIT_SET(currentStatus.LOOP_TIMER, TPS_READ_TIMER_BIT);
-  // tpsDOT is differentiated on its own (slower) timer bit - see TPS_DOT_FREQUENCY in sensors.h.
-  // TPS is sampled at 200Hz but the AE thresholds and the +/-2550 clamp assume a 30Hz interval.
   BIT_SET(currentStatus.LOOP_TIMER, TPS_DOT_TIMER_BIT);
+  // tpsDOT divides by the *measured* TPS sample interval (getTPSDeltaTime()), so the tests supply
+  // an explicit interval instead of relying on the old assumed TPS_READ_FREQUENCY. 1/30s preserves
+  // the historic expectation that N% of TPS movement reads as N*30 %/s.
+  setTPSSampleIntervalUs(33333U);
   configPage2.aeMode = AE_MODE_TPS; //Set AE to TPS
 
   TEST_DATA_P uint8_t bins[] = { 0, 8, 22, 97 };
@@ -1024,7 +1032,7 @@ static void setup_TAE()
   configPage2.taeMinChange = 0;
 }
 
-extern uint16_t correctionAccel(void);
+extern void setTPSSampleIntervalUs(uint32_t interval);
 
 static void disable_AE_taper(void) {
   //Disable the taper

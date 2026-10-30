@@ -91,17 +91,17 @@ void initialiseCLT(void);
 
 /** @brief The rate at which TPS *rate of change* (tpsDOT) is evaluated, in Hz.
  *
- * Deliberately decoupled from @ref TPS_READ_FREQUENCY. tpsDOT feeds acceleration enrichment, whose
- * thresholds (configPage2.taeThresh / taeMinChange) and ±2550 %/s clamp were all sized for a 30Hz
- * sample interval. Sampling TPS faster is what we want (flat shift, launch and every TPS-gated rule
- * care about the *level*, not the rate), but deriving tpsDOT from two adjacent samples at 200Hz would
- * raise its noise floor 6.7x - one LSB of TPS jitter would read as 100 %/s instead of 15 %/s and
- * trip AE continuously.
+ * tpsDOT now uses real elapsed time (see getTPSDeltaTime()), so it is correct at any sample rate.
+ * This therefore simply follows the TPS sample rate - differentiated over one sample interval, which
+ * at 200Hz is 5ms and gives the tightest possible tip-in response.
  *
- * So: sample fast, differentiate over a 30Hz window. Changing this needs the AE thresholds revisited.
+ * The one thing that *does* need care is noise: tpsDOT divides by tpsDeltaTime, so back-to-back
+ * reads would divide by a near-zero interval. TPS_DOT_MIN_PERIOD_US floors that divisor. 1ms is well
+ * below the 5ms interval produced by a 200Hz TPS read, so the floor never distorts a normal sample -
+ * it only bounds the pathological case.
  */
-#define TPS_DOT_FREQUENCY 30
-#define TPS_DOT_TIMER_BIT BIT_TIMER_30HZ
+#define TPS_DOT_TIMER_BIT TPS_READ_TIMER_BIT
+#define TPS_DOT_MIN_PERIOD_US 1000U
 
 /** @brief Define the VSS (vehicle speed) read frequency. Feeds traction control, boost-by-speed and
  *  gear detection. The edge capture is in an ISR; this is only the derived value. */
@@ -121,6 +121,14 @@ void initialiseCLT(void);
 
 /** @brief Read the sensors that are polled at every loop. This includes the TPS, MAP, CLT, IAT and O2 sensors */
 void readPolledSensors(loop_timer_t loopTimer);
+
+/** @brief Get the time in µS between the last 2 TPS readings. Feeds tpsDOT. */
+uint32_t getTPSDeltaTime(void);
+
+#if defined(UNIT_TEST)
+/** @brief Override the measured TPS sample interval. Unit tests only - see sensors.cpp. */
+void setTPSSampleIntervalUs(uint32_t interval);
+#endif
 
 /** @brief Initialize the MAP calculation & Baro values */
 void initialiseMAPBaro(void);
