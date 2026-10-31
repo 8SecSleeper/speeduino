@@ -63,7 +63,7 @@ SEPARATOR = "std_separator"
 # Anything else changing this digest means a real offset may have moved, which
 # silently invalidates existing .msq files. Update this constant only after
 # deliberately confirming that.
-EXPECTED_CONSTANTS_DIGEST = "80afb5c95af0706f"
+EXPECTED_CONSTANTS_DIGEST = "3e882d49d285e620"
 
 # Why this changed (from cfb0d92d5e1553bf):
 #   onboard_log_file_rate's 4th enum label went "30Hz" -> "100Hz" (the SD logger's
@@ -73,6 +73,17 @@ EXPECTED_CONSTANTS_DIGEST = "80afb5c95af0706f"
 # no other field moved, and ochBlockSize is still 139. Only the display text differs, so no
 # .msq offset is affected - the digest cannot tell a label edit from an offset move, which
 # is why it is pinned and why this note is required.
+
+# Changed again 80afb5c95af0706f -> 3e882d49d285e620 (the TunerStudio #1224 fix):
+#   Added iacCLminSteps/iacCLmaxSteps at page 15 offsets 106/107, and shrank the reserved
+#   tail Unused15_106_255[150] -> Unused15_108_255[148] to make room. Also inlined the
+#   idleRes/idleResMax scale into iacCLminValue/iacCLmaxValue (now a constant 1.0, PWM
+#   only) and deleted the two [OutputChannels] helper definitions.
+# Verified by diffing every [Constants] field's offset+width between the two revisions:
+#   ADDED iacCLminSteps, iacCLmaxSteps, Unused15_108_255
+#   REMOVED Unused15_106_255
+#   MOVED / RESIZED: none
+# The bytes used were already reserved-and-unused, so no .msq offset is affected.
 
 # Sections that can define referenceable objects.
 SECTION_USERDEF = "userdefined"

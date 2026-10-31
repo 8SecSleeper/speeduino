@@ -122,9 +122,13 @@ void initialiseIdle(bool forcehoming)
       //Case 5 is Stepper closed loop
       _idleState.iacStepTime_uS = configPage6.iacStepTime * 1000;
       _idleState.iacCoolTime_uS = configPage9.iacCoolTime * 1000;
+      // Dedicated stepper limits (configPage15). No x3 here: unlike the old shared
+      // iacCLminValue/iacCLmaxValue, these are already scaled to steps by the ini's constant
+      // 3.0 factor, which is what removes the conditional scale TunerStudio could not resolve
+      // (upstream issue #1224). <<2 is the PID resolution multiplier.
       configureIdlePID(configPage6, 
-                       (configPage2.iacCLminValue * 3)<<2, 
-                       (configPage2.iacCLmaxValue * 3)<<2,
+                       configPage15.iacCLminSteps<<2, 
+                       configPage15.iacCLmaxSteps<<2,
                        currentStatus.CLIdleTarget * 3);
       configPage6.iacPWMrun = false; // just in case. This needs to be false with stepper idle
       break;
@@ -134,8 +138,8 @@ void initialiseIdle(bool forcehoming)
       _idleState.iacStepTime_uS = configPage6.iacStepTime * 1000;
       _idleState.iacCoolTime_uS = configPage9.iacCoolTime * 1000;
       configureIdlePID(configPage6, 
-                       (configPage2.iacCLminValue * 3)<<2,
-                       (configPage2.iacCLmaxValue * 3)<<2, //Maximum number of steps; always less than home steps count.
+                       configPage15.iacCLminSteps<<2,
+                       configPage15.iacCLmaxSteps<<2, //Maximum number of steps; always less than home steps count.
                        0);
       configPage6.iacPWMrun = false; // just in case. This needs to be false with stepper idle
       break;

@@ -935,6 +935,13 @@ struct config15 : public config_page_t {
   byte rollingProtCutPercent[4];
   
   //Bytes 106-255
-  byte Unused15_106_255[150];
+  // Dedicated closed-loop idle limits, one pair per idle family. The original shared
+  // iacCLminValue/iacCLmaxValue (page 1, 61/62) needs a conditional scale on iacAlgorithm,
+  // which lives on page 6 - TunerStudio cannot resolve that at project load and multiplies
+  // the value by 3 on every open (upstream issue #1224). These carry a constant 3.0 scale
+  // instead, so read and write can never disagree.
+  byte iacCLminSteps;
+  byte iacCLmaxSteps;
+  byte Unused15_108_255[148];
 
 } __attribute__((packed,aligned(__alignof__(uint16_t)))); //The 32 bit systems require all structs to be fully packed, aligned to their largest member type 
