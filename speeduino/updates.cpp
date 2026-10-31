@@ -96,9 +96,27 @@ TESTABLE_STATIC void upgradeV26toV27(void) {
   }
 }
 
+TESTABLE_STATIC void upgradeV27toV28(void) {
+  if(loadEEPROMVersion() == 27U)
+  {
+    /* The byte configPage9.wbo2AfrRef occupies was unused10_184, so whatever a stored tune has there
+     * is leftover data, not a user setting. Left alone it would either be zero (which the conversion
+     * treats as "disabled", silently preserving issue #1506) or an arbitrary value that would badly
+     * rescale every O2 reading. Force the gasoline scale.
+     *
+     * 147 leaves stoich==147 tunes reading exactly as they do today, and makes stoich!=147 tunes
+     * (E10, E85, methanol) read correctly for the first time.
+     */
+    configPage9.wbo2AfrRef = WBO2_AFR_REF_DEFAULT;
+
+    saveAllPages();
+    saveEEPROMVersion(28);
+  }
+}
+
 void doUpdates(void)
 {
-  #define CURRENT_DATA_VERSION    27
+  #define CURRENT_DATA_VERSION    28
   //Only the latest update for small flash devices must be retained
    #ifndef SMALL_FLASH_MODE
 
@@ -850,6 +868,7 @@ void doUpdates(void)
   }
   upgradeV25toV26();
   upgradeV26toV27();
+  upgradeV27toV28();
   //Move this #endif to only do latest updates to safe ROM space on small devices.
   #endif
 
@@ -869,6 +888,12 @@ void doUpdates(void)
     configPage13.outputPin[7] = 0;
 
     configPage4.FILTER_FLEX = FILTER_FLEX_DEFAULT;
+
+    //A brand new device has zeroed config pages, which leaves the wideband reference at 0. That
+    //reads as "disabled" in wbo2ToFuelAfr(), so a fresh E10/E85 tune would silently keep the very
+    //offset issue #1506 describes. The 27->28 upgrade cannot cover this case: it only runs for an
+    //existing tune. Set it here so a new install starts correct.
+    configPage9.wbo2AfrRef = WBO2_AFR_REF_DEFAULT;
 
     saveEEPROMVersion(CURRENT_DATA_VERSION);
   }

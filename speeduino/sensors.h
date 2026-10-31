@@ -129,6 +129,33 @@ void initialiseCLT(void);
  *  coolant sensor. */
 #define OIL_PRESSURE_READ_TIMER_BIT BIT_TIMER_20HZ
 
+/** @brief The default wideband AFR reference, in AFR x10 (i.e. 14.7 AFR => 147).
+ *
+ * A wideband controller measures lambda, but its analogue output is almost always documented on the
+ * gasoline scale: `reported AFR = lambda x 14.7`. That reference belongs to the *controller*, not to
+ * the fuel in the tank - the controller has no idea what fuel stoich is configured in Speeduino.
+ *
+ * Speeduino stores currentStatus.O2 as *fuel referenced* AFR - see the INI, which derives the
+ * displayed channel as `lambda = { afr / stoich }`. A gasoline scaled wideband reading therefore has
+ * to be rescaled before it is stored, or every consumer (EGO, includeAFR, AFR protection, logging,
+ * gauges) compares a 14.7 reference against a fuel specific target and reports a false error.
+ *
+ * 147 = 14.70 AFR, the gasoline scale, which is what nearly every wideband uses.
+ */
+#define WBO2_AFR_REF_DEFAULT 147U
+
+/** @brief Convert a wideband controller reading to the fuel referenced AFR used internally.
+ *
+ * @param wbo2Afr10   The AFR x10 the controller reported (from the AFR calibration table).
+ * @param wbo2AfrRef10 The AFR x10 at which that controller reports lambda 1.00 (usually 147).
+ * @param stoich10    The configured fuel stoichiometric ratio, AFR x10 (configPage2.stoich).
+ * @return The equivalent fuel referenced AFR x10.
+ *
+ * Works in lambda: `lambda = wbo2Afr10 / wbo2AfrRef10`, then `fuelAfr = lambda * stoich10`. Rounded
+ * to nearest and saturated to 255 (25.5 AFR) to fit the 8 bit status field.
+ */
+uint8_t wbo2ToFuelAfr(uint8_t wbo2Afr10, uint8_t wbo2AfrRef10, uint8_t stoich10);
+
 /** @brief Read the sensors that are polled at every loop. This includes the TPS, MAP, CLT, IAT and O2 sensors */
 void readPolledSensors(loop_timer_t loopTimer);
 

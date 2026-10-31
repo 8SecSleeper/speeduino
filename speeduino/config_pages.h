@@ -631,7 +631,7 @@ struct config9 : public config_page_t {
   byte dfcoTaperEnable : 1;
   byte unused10_183 : 6;
 
-  byte unused10_184;
+  byte wbo2AfrRef; /* < The AFR x10 at which the wideband controller reports lambda 1.00 (typically 147 = 14.70 for the gasoline scale). Used to rescale an analogue wideband reading into the fuel referenced AFR the rest of the firmware expects. 0 = disabled / legacy passthrough. Reclaims the former unused10_184 byte, so the page layout is unchanged. */
 
   byte afrProtectEnabled : 2; /* < AFR protection enabled status. 0 = disabled, 1 = fixed mode, 2 = table mode */
   byte afrProtectMinMAP; /* < Minimum MAP. Stored value is divided by 2. Increments of 2 kPa, maximum 511 (?) kPa */

@@ -691,13 +691,44 @@ void resetMAPcycleAndEvent(void)
 
 // ========================================== O2 ==========================================
 
+uint8_t wbo2ToFuelAfr(uint8_t wbo2Afr10, uint8_t wbo2AfrRef10, uint8_t stoich10)
+{
+  //A zero reference would divide by zero. Fall back to legacy behaviour (trust the reading as-is)
+  //rather than producing garbage: a tune that has never had the field written looks like this.
+  if( (wbo2AfrRef10 == 0U) || (stoich10 == 0U) ) { return wbo2Afr10; }
+
+  //lambda = wbo2Afr10 / wbo2AfrRef10, so fuelAfr = wbo2Afr10 * stoich10 / wbo2AfrRef10.
+  //Max dividend is 255*255 = 65025, so this fits a uint32_t with a uint16_t divisor.
+  //Rounding is to nearest: the +half-divisor form, as truncation would bias every reading lean.
+  const uint32_t dividend = ((uint32_t)wbo2Afr10 * (uint32_t)stoich10) + ((uint32_t)wbo2AfrRef10 / 2U);
+  uint32_t fuelAfr = fast_div(dividend, (uint16_t)wbo2AfrRef10);
+
+  //currentStatus.O2 is 8 bit, so saturate rather than wrap
+  if(fuelAfr > (uint32_t)UINT8_MAX) { fuelAfr = (uint32_t)UINT8_MAX; }
+  return (uint8_t)fuelAfr;
+}
+
+/**
+ * @brief Apply the wideband reference to a raw AFR calibration table reading.
+ *
+ * A narrow band sensor is not a lambda measurement in the same sense - its "calibration table" output
+ * is already whatever the user calibrated it to, and it is only ever used as rich/lean of stoich. It
+ * is therefore left untouched. CAN wideband input is already converted by the receiving code in
+ * comms_CAN.cpp (it multiplies true lambda by stoich), so it must not be scaled again here.
+ */
+TESTABLE_INLINE_STATIC uint8_t applyWbo2AfrReference(uint8_t wbo2Afr10)
+{
+  if(configPage6.egoType != EGO_TYPE_WIDE) { return wbo2Afr10; }
+  return wbo2ToFuelAfr(wbo2Afr10, configPage9.wbo2AfrRef, configPage2.stoich);
+}
+
 static inline void readO2_1(void)
 {
   //An O2 read is only performed if an O2 sensor type is selected. This is to prevent potentially dangerous use of the O2 readings prior to proper setup/calibration
   if(configPage6.egoType > 0U)
   {
     currentStatus.O2ADC = LOW_PASS_FILTER(readAnalogSensor(pinNumbers.pinO2), configPage4.ADCFILTER_O2, currentStatus.O2ADC);
-    currentStatus.O2 = table2D_getValue(&o2CalibrationTable, currentStatus.O2ADC);
+    currentStatus.O2 = applyWbo2AfrReference(table2D_getValue(&o2CalibrationTable, currentStatus.O2ADC));
   }
   else
   {
@@ -713,7 +744,7 @@ static inline void readO2_2(void)
   if (pinNumbers.pinO2_2!=0U)
   {
     currentStatus.O2_2ADC = LOW_PASS_FILTER(readAnalogSensor(pinNumbers.pinO2_2), configPage4.ADCFILTER_O2, currentStatus.O2_2ADC);
-    currentStatus.O2_2 = table2D_getValue(&o2CalibrationTable, currentStatus.O2_2ADC);
+    currentStatus.O2_2 = applyWbo2AfrReference(table2D_getValue(&o2CalibrationTable, currentStatus.O2_2ADC));
   }
 }
 
