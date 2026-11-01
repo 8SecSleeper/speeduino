@@ -3,6 +3,8 @@
 #include "storage.h"
 #include "pages.h"
 #include "ltt.h"
+#include "raceTime.h"
+#include "globals.h"
 #include "fake_memory_storage.h"
 
 /**
@@ -226,6 +228,78 @@ static void test_ltt_page_terminates_when_storage_too_small(void)
                               "page 16 kept a hopeless burn pending - the loop would never end");
 }
 
+
+// ============================ Page 17: race-time block ============================
+//
+// The same contract as page 16, and it exists because page 16 got it wrong once and wore
+// flash continuously. Page 17 is a fresh implementation of that contract, so it is tested the
+// same way rather than assumed correct.
+
+/** @brief Page 17 must terminate a hopeless burn (backend too small for the block). */
+static void test_racetime_page_terminates_when_storage_too_small(void)
+{
+    setStorageAPI(getMemoryStorageApi(4284U, 160U, 0xFF));
+    initialiseRaceTime(currentStatus);
+
+    TEST_ASSERT_FALSE_MESSAGE(raceTimeIsAvailable(),
+                              "the race-time block must disable itself on a backend too small to hold it");
+    TEST_ASSERT_FALSE(raceTimeNeedsSave());
+
+    savePage(raceTimePage);
+    TEST_ASSERT_FALSE_MESSAGE(isEepromWritePending(),
+                              "page 17 kept a hopeless burn pending - the loop would never end");
+}
+
+/** @brief Page 17 must consume the budget honestly and never loop forever. */
+static void test_racetime_page_consumes_budget(void)
+{
+    setStorageAPI(getMemoryStorageApi(MEMORY_STORAGE_CAPACITY, 160U, 0xFF));
+    initialiseRaceTime(currentStatus);
+    TEST_ASSERT_TRUE_MESSAGE(raceTimeIsAvailable(), "test needs a backend large enough for the block");
+
+    raceTimeMarkDirty();
+    setEepromWritePending(true);
+
+    uint16_t iterations = 0U, before = 0U, after = 0U;
+    run_burn_loop_to_completion(200U, iterations, before, after);
+
+    TEST_ASSERT_FALSE_MESSAGE(isEepromWritePending(), "burn loop did not terminate with page 17 present");
+    TEST_ASSERT_LESS_THAN_MESSAGE(200, iterations, "burn loop needed more passes than pages - it is looping");
+}
+
+/** @brief An unchanged page 17 must not rewrite its payload on every full-tune burn. */
+static void test_racetime_page_is_noop_when_unchanged(void)
+{
+    setStorageAPI(getMemoryStorageApi(MEMORY_STORAGE_CAPACITY, MEMORY_STORAGE_CAPACITY, 0xFF));
+    initialiseRaceTime(currentStatus);
+
+    // Settle it once.
+    (void)raceTimeSave();
+    TEST_ASSERT_FALSE(raceTimeNeedsSave());
+
+    const uint16_t writesBefore = memoryStorage.writeCount;
+    savePage(raceTimePage);
+    const uint16_t writesAfter = memoryStorage.writeCount;
+
+    TEST_ASSERT_EQUAL_MESSAGE(writesBefore, writesAfter,
+                              "an unchanged page 17 rewrote its payload - that is flash wear for nothing");
+}
+
+/** @brief A torn payload (bad CRC) must be discarded, never applied. */
+static void test_racetime_block_is_self_consistent_after_save(void)
+{
+    setStorageAPI(getMemoryStorageApi(MEMORY_STORAGE_CAPACITY, MEMORY_STORAGE_CAPACITY, 0xFF));
+    initialiseRaceTime(currentStatus);
+
+    // Corrupt the payload behind the block's back, leaving the old header (and CRC) in place.
+    memoryStorage.data[EEPROM_RACETIME_PAYLOAD + 5U] ^= 0xFFU;
+
+    initialiseRaceTime(currentStatus);
+
+    // It must have fallen back to defaults rather than loading the corrupted curve.
+    TEST_ASSERT_EQUAL_UINT8(RT_DISABLED, raceTimeGetPage().enable);
+}
+
 void testBurnLoop(void)
 {
     SET_UNITY_FILENAME() {
@@ -238,5 +312,9 @@ void testBurnLoop(void)
         RUN_TEST(test_lttNeedsSave_true_when_dirty);
         RUN_TEST(test_saved_block_is_self_consistent);
         RUN_TEST(test_ltt_page_terminates_when_storage_too_small);
+        RUN_TEST(test_racetime_page_terminates_when_storage_too_small);
+        RUN_TEST(test_racetime_page_consumes_budget);
+        RUN_TEST(test_racetime_page_is_noop_when_unchanged);
+        RUN_TEST(test_racetime_block_is_self_consistent_after_save);
     }
 }

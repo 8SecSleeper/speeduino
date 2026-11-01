@@ -370,7 +370,23 @@ byte getTSLogEntry(uint16_t byteNum)
     case 136: statusValue = lowByte(fuelSchedule8.pw); break;
     case 137: statusValue = highByte(fuelSchedule8.pw); break;
 #endif
-    case 138: statusValue = currentStatus.systemTemp; break;
+    // FND-05 race-time channels. NOTE the numbering: a channel index N is the Nth byte of the
+    // packet, and a multi-byte scalar starting at channel N occupies N and N+1. So a 32-bit
+    // value split across two U16 scalars needs three indices, not two:
+    //
+    //   ini raceTimeLo = U16 -> channels 138,139  (bits 0-15)
+    //   ini raceTimeHi = U16 -> channels 140,141  (bits 16-31)
+    //   -> 32-bit value lives in channels 138..141, so the NEXT free channel is 142.
+    //
+    // Getting this wrong by one is not a silent bug: TunerStudio rejects an ini that requests a
+    // channel beyond ochBlockSize-1, and the page will not load at all.
+    case 138: statusValue = lowByte(currentStatus.raceTimeMs); break;   //raceTime bits 0-7
+    case 139: statusValue = (currentStatus.raceTimeMs >> 8) & 0xFFU; break;  //8-15
+    case 140: statusValue = (currentStatus.raceTimeMs >> 16) & 0xFFU; break; //16-23
+    case 141: statusValue = (currentStatus.raceTimeMs >> 24) & 0xFFU; break; //24-31
+    case 142: statusValue = currentStatus.raceTimeState; break;          //RaceTimeState
+    case 143: statusValue = currentStatus.raceTimeStatus; break;
+    case 144: statusValue = currentStatus.systemTemp; break;
     default: statusValue = 0; // MISRA check
   }
 
@@ -717,7 +733,7 @@ bool is2ByteEntry(uint8_t key)
   // This array indicates which index values from the log are 2 byte values
   // This array MUST remain in ascending order
   // !!!! WARNING: If any value above 255 is required in this array, changes MUST be made to is2ByteEntry() function !!!!
-  static constexpr byte PROGMEM fsIntIndex[] = {4, 14, 17, 22, 26, 28, 33, 42, 44, 46, 48, 50, 52, 54, 56, 58, 60, 62, 64, 66, 68, 70, 72, 76, 78, 80, 82, 86, 88, 90, 93, 95, 99, 104, 111, 121, 125, 130, 132, 134, 136 };
+  static constexpr byte PROGMEM fsIntIndex[] = {4, 14, 17, 22, 26, 28, 33, 42, 44, 46, 48, 50, 52, 54, 56, 58, 60, 62, 64, 66, 68, 70, 72, 76, 78, 80, 82, 86, 88, 90, 93, 95, 99, 104, 111, 121, 125, 130, 132, 134, 136, 138, 140 };
 
   unsigned int bot = 0U;
   unsigned int mid = _countof(fsIntIndex);

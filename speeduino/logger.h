@@ -11,7 +11,23 @@
 
 #include "statuses.h"
 
-constexpr uint8_t LOG_ENTRY_SIZE = 138; /**< The size of the live data packet. This MUST match ochBlockSize setting in the ini file */
+/**
+ * @brief Number of live-data channels (bytes) the firmware will serve.
+ *
+ * This is NOT the byte count on the wire: generateLiveValues() prepends one reply-code byte, so
+ * the wire length is LOG_ENTRY_SIZE + 1. In the ini that is exactly `ochBlockSize`, and the
+ * highest legal channel index is LOG_ENTRY_SIZE - 1.
+ *
+ * FND-05 moved this from 138 to 145. The added channels are:
+ *   138..141  raceTime (32-bit, published as two U16 halves)
+ *   142       raceTimeState
+ *   143       raceTimeStatus
+ *   144       systemTemp  (previously declared at 138 and therefore never actually sent)
+ *
+ * Both constants MUST agree with reference/speeduino.ini. If they drift, TunerStudio rejects the
+ * ini outright: ochBlockSize-1 is the highest channel it will ask for.
+ */
+constexpr uint8_t LOG_ENTRY_SIZE = 145;
 
 byte getTSLogEntry(uint16_t byteNum);
 

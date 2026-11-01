@@ -52,6 +52,14 @@ static void test_loadAllPages(void)
         if (page==lttPage) {
             continue;
         }
+        // Page 17 (race-time framework) is excluded for the same reason as page 16, and by the
+        // same mechanism: it lives above the core tune block with its own magic/version/CRC
+        // header, and initialiseRaceTime() (see speeduino/raceTime.cpp) is what decides whether
+        // to load it, based on the storage backend actually being large enough and the header
+        // actually matching. Loading it here would apply an unvalidated curve.
+        if (page==raceTimePage) {
+            continue;
+        }
         assert_page(page, BUFFER_MARKER);
     }
 }

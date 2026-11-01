@@ -16,6 +16,7 @@ A full copy of the license may be found in the projects root directory
 #include "scheduler.h"
 #include "storage_details.h"
 #include "ltt.h"
+#include "raceTime.h"
 
 using namespace storage::details;
 
@@ -208,6 +209,7 @@ TESTABLE_STATIC uint16_t getEntityStartAddress(page_iterator_t iter) {
     { &boostTableLookupDuty, EEPROM_CONFIG15_MAP },
     { &configPage15, EEPROM_CONFIG15_START },
     { &lttData, EEPROM_LTT_PAYLOAD },
+    { &raceTimeData, EEPROM_RACETIME_PAYLOAD },
   };
   static const constexpr entity_storage_map_t* entityMapEnd = entityMap + _countof(entityMap);
 
@@ -459,6 +461,17 @@ void savePage(uint8_t pageNum)
       | only find in the field, so the budget is now honoured and asserted in a unit test.
       -----------------------------------------------------*/
       writesRemaining = lttSaveBlock(writesRemaining);
+      break;
+
+    case raceTimePage:
+      /*---------------------------------------------------
+      | Race-time block - Page 17 (See raceTime.h for layout)
+
+      | Same contract as page 16 and for the same reason: the block carries a header that must
+      | describe the payload, so it is written through raceTimeSaveBlock() rather than directly.
+      | The budget MUST be reported back - see the warning on the ltt branch above.
+      -----------------------------------------------------*/
+      writesRemaining = raceTimeSaveBlock(writesRemaining);
       break;
 
     default:

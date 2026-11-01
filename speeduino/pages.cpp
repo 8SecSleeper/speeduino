@@ -5,6 +5,7 @@
 #include "table3d_visitor.h"
 #include "prog_mem_support.h"
 #include "ltt.h"
+#include "raceTime.h"
 
 // This minimizes RAM usage at no performance cost
 #pragma GCC optimize ("Os") 
@@ -367,6 +368,11 @@ static page_map_t getPageMap(uint8_t pageNumber)
   static constexpr entity_t lttPageMap[] PROGMEM = {
     makeEntity(&lttData, sizeof(lttBlock)),
   };
+  // Page 17: the race-time block. Single raw entity, packed and contiguous for the same reason
+  // as page 16 - TunerStudio page offsets must map linearly onto it. See raceTime.h.
+  static constexpr entity_t raceTimePageMap[] PROGMEM = {
+    makeEntity(&raceTimeData, sizeof(raceTimeBlock)),
+  };
 
   static constexpr page_map_t pageMaps[MAX_PAGE_NUM] PROGMEM = {
     { pageZeroMap, _countof(pageZeroMap) },
@@ -386,6 +392,7 @@ static page_map_t getPageMap(uint8_t pageNumber)
     { ign2PageMap, _countof(ign2PageMap) },
     { boostVvt2PageMap, _countof(boostVvt2PageMap) },
     { lttPageMap, _countof(lttPageMap) },
+    { raceTimePageMap, _countof(raceTimePageMap) },
   };
 
   if (pageNumber>=MAX_PAGE_NUM)
@@ -475,6 +482,7 @@ void __attribute__((noinline)) setTuneToEmpty(void) {
   // first time - the user would see no EGO correction at all and no obvious reason why.
   // Give it its real defaults instead.
   lttRestoreDefaults();
+  raceTimeRestoreDefaults();
 }
 
 uint16_t getPageSize(byte pageNum)

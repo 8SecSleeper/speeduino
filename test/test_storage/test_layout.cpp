@@ -128,7 +128,10 @@ static uint8_t test_no_overlap_page(uint8_t pageNum, block blocks[], size_t leng
 }
 
 static void test_no_entity_overlap(void) {
-    block blocks[28];
+    // Sized for every entity across every page. This must be >= the total entity count, or the
+    // TEST_ASSERT_LESS_THAN inside the walker fires instead of the real overlap check - which
+    // looks like an overlap bug when it is only a too-small buffer. Bumped for page 17.
+    block blocks[32];
     uint8_t idxCurrBlock = 0U;
 
     for (uint8_t i = MIN_PAGE_NUM; i < MAX_PAGE_NUM; i++) {

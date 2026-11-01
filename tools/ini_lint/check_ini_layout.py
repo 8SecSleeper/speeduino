@@ -63,7 +63,41 @@ SEPARATOR = "std_separator"
 # Anything else changing this digest means a real offset may have moved, which
 # silently invalidates existing .msq files. Update this constant only after
 # deliberately confirming that.
-EXPECTED_CONSTANTS_DIGEST = "804fb7f8e41c3bdf"
+EXPECTED_CONSTANTS_DIGEST = "179894c5f6cba54c"
+
+# Why this changed (from c2f00b138a6e456b):
+#   rtArmPin changed from `scalar, U08, 1, "", ...` to the same 6-bit dropdown form used by
+#   vssPin / knock_pin / n2o_arming_pin: `bits, U08, 1, [0:5], $IO_Pins_no_def` plus a
+#   rtArmPinUnused_6_7 mask. This is a TYPE change (scalar -> bits) at the SAME offset 1, in
+#   the SAME byte, so no offset moved and no .msq is invalidated: a stored U08 pin number is
+#   read identically by a bits [0:5] field, and the new [6:7] mask simply names the padding
+#   bits that were already there. The dropdown now offers real board pins (3-53 and A8-A15)
+#   instead of a raw 0-255 number.
+#   Also added the page-17 `defaultValue =` entries (drag-racing defaults: arm pin 35,
+#   active-low, VSS false-start detection, and a descending 12->0 degree retard curve). Those
+#   live in [ConstantsExtensions], which is not part of this digest.
+#
+# Why this changed (from 10308711b0895cd6):
+#   rtCurveLabel's declaration was corrected from `string, ASCII, 16, [20], "Axis label"` to
+#   `string, ASCII, 16, 20`. The [shape] form is array/bits syntax and made TunerStudio refuse
+#   the whole page ("Error loading [Constant] ... Problem at: rtCurveLabel"). This is a SYNTAX
+#   fix only: the field is still 20 bytes at page 17 offset 16, so no offset moved and no .msq
+#   is invalidated. A CONST-STRING-BAD-LENGTH check was added to this linter so the same
+#   mistake cannot reach TunerStudio again - the layout checks alone cannot see field syntax.
+#
+# Why this changed (from 804fb7f8e41c3bdf, then f287ed6969af9f2e):
+#   Added page 17 - the FND-05 race-time block (see speeduino/raceTime.h). This APPENDS a new
+#   page after page 16; no existing constant moved and no existing offset changed, so no saved
+#   .msq loses meaning. New page 17 constants: rtEnable, rtArmPin, rtArmPolarity, rtArmPullup,
+#   rtStartSource, rtStopSource, rtMotionSource, rtCurveEnable, rtStopTimeMs, rtStopSpeed,
+#   rtFalseStartSpeed, rtCurveTimeSpan, rtCurveLabel, rtCurveRetard, plus the padding arrays
+#   rtUnused*. Page 17's pageSize (256) and the offsetof() assertions in raceTime.h are the
+#   contract between this section and the C++ struct - they fail the build if they drift.
+# Verified offset-neutral: page 16 ends at lttRichAuth2 (offset 1808 + 16x16), and page 17
+#   begins at its own offset 0. Every pre-existing field in [Constants] keeps its offset.
+# The [OutputChannels] section also grew (ochBlockSize 139 -> 143, raceTime channels appended
+#   at indices 138-141, systemTempRaw moved 138 -> 144). That section is not part of this
+#   digest, and appending to it cannot invalidate a .msq because it carries no tune offsets.
 
 # Why this changed (from b9c364fd6c4aede3):
 #   egoLimit's INI maximum went 16 -> 100. This is a RANGE change only - the field stays a
@@ -147,6 +181,13 @@ RE_HELP = re.compile(r"^\s*help\s*=\s*([A-Za-z0-9_.]+)", re.I)
 
 # A "field" in [Constants] - used only for the offset-integrity digest.
 RE_CONST_FIELD = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=")
+
+# A full [Constants] declaration: name = class, type, offset, ...
+RE_CONST_DECL = re.compile(
+    r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(bits|scalar|array|string)\s*,\s*"
+    r"([A-Za-z0-9]+)\s*,\s*(.*)$", re.I)
+
+VALID_CONST_TYPES = {"U08", "S08", "U16", "S16", "U32", "S32", "F32", "ASCII"}
 
 
 class Report:
@@ -557,6 +598,204 @@ def check(path: str, strict: bool, verbose: bool) -> int:
             rep.info("UNREACHABLE",
                      f"{kind} '{name}' is defined but not reachable from "
                      "[Menu]", idx + 1)
+
+    # ---- OutputChannels fit inside ochBlockSize ----------------------------
+    # A channel index N is the Nth byte of the live-data payload, and a multi-byte scalar at N
+    # occupies N..N+width-1. TunerStudio asks for channels 0..ochBlockSize-1 and refuses to load
+    # the ini if any declaration needs a byte beyond that.
+    #
+    # This shipped broken once: raceTime was split across two U16 scalars, which spans THREE
+    # indices (138,139 and 140,141), and the following fields were placed at 142/143 as if only
+    # two were consumed. Both of those were past the end of the packet.
+    oc_start = None
+    och_size = None
+    for i, raw in enumerate(ini.lines):
+        stripped = strip_comment(raw).strip()
+        if stripped == "[OutputChannels]":
+            oc_start = i
+            continue
+        if oc_start is not None and och_size is None:
+            m = re.match(r"^ochBlockSize\s*=\s*(\d+)", stripped, re.I)
+            if m:
+                och_size = int(m.group(1))
+            elif stripped.startswith("["):
+                break
+
+    if oc_start is not None and och_size:
+        widest = 0
+        for i in range(oc_start, len(ini.lines)):
+            stripped = strip_comment(ini.lines[i]).strip()
+            if stripped.startswith("[") and i > oc_start:
+                break
+            m = re.match(r"^([A-Za-z_]\w*)\s*=\s*(scalar|array|bits)\s*,\s*(\w+)\s*,\s*(\d+)",
+                         stripped, re.I)
+            if not m:
+                continue
+            name, cls, typ, off = m.group(1), m.group(2).lower(), m.group(3), int(m.group(4))
+            width = {"U08": 1, "S08": 1, "U16": 2, "S16": 2, "U32": 4, "S32": 4}.get(typ.upper(), 1)
+            if cls == "bits":
+                width = 1
+            elif cls == "array":
+                shape = re.search(r"\[(\d+)(?:x(\d+))?\]", stripped)
+                if shape:
+                    width *= int(shape.group(1)) * (int(shape.group(2)) if shape.group(2) else 1)
+            top = off + width - 1
+            widest = max(widest, top)
+            if top > och_size - 1:
+                rep.error("OCH-OVERRUN",
+                          f"{name} occupies channel(s) {off}..{top}, but ochBlockSize={och_size} "
+                          f"means the highest legal channel is {och_size - 1}. TunerStudio will "
+                          f"refuse to load this ini.", i + 1)
+
+        # And the converse: a packet far larger than declared is dead weight on every poll.
+        if widest < och_size - 1:
+            rep.info("OCH-SLACK",
+                     f"ochBlockSize={och_size} but the highest declared channel is {widest}; "
+                     f"{och_size - 1 - widest} unused byte(s) are sent on every poll", 0)
+
+    # ---- array defaultValue arity ------------------------------------------
+    # An array `defaultValue =` must supply exactly as many values as the array's shape. A
+    # short list leaves the tail at whatever the page held, which is how a curve ends up partly
+    # defaulted and partly garbage.
+    for i, raw in enumerate(ini.lines):
+        line = strip_comment(raw).strip()
+        m = re.match(r"^defaultValue\s*=\s*([A-Za-z_]\w*)\s*,\s*(.*)$", line, re.I)
+        if not m:
+            continue
+        name, values = m.group(1), m.group(2)
+        decl = re.search(r"^\s*" + re.escape(name) +
+                         r"\s*=\s*array\s*,\s*\w+\s*,\s*\S+\s*,\s*\[(\d+)(?:x(\d+))?\]",
+                         "\n".join(ini.lines), re.M)
+        if not decl:
+            continue
+        expected = int(decl.group(1)) * (int(decl.group(2)) if decl.group(2) else 1)
+        got = len(re.findall(r"-?\d+(?:\.\d+)?", values))
+        if got != expected:
+            rep.error("DEFAULT-ARITY",
+                      f"{name}: defaultValue supplies {got} value(s) but the array shape "
+                      f"needs {expected}. The shortfall is left uninitialised.", i + 1)
+
+    # ---- self-gated menus (unreachable feature) ----------------------------
+    # A subMenu gated on a constant that lives INSIDE the dialog it opens can never be
+    # entered: the item is greyed out until the setting is on, and that dialog is the only
+    # place to switch it on. This shipped once - `subMenu = raceTimeSettings, ..., { rtEnable }`
+    # greyed out the very page that holds the enable switch.
+    #
+    # The established convention in this file is that the dialog holding an enable switch is
+    # never gated on it (LaunchControl, lttSettings, fanSettings all follow this).
+    def _dialog_owned_fields(dialog_name: str) -> set[str]:
+        hits = defs.get(dialog_name)
+        if not hits:
+            return set()
+        start = hits[0][0]
+        owned: set[str] = set()
+        for j in range(start + 1, len(ini.lines)):
+            raw_j = strip_comment(ini.lines[j]).strip()
+            if not raw_j:
+                continue
+            if ini.lines[j].strip().startswith("["):
+                break
+            if re.match(r"^(dialog|panel|curve|table|indicatorPanel|help|menu|"
+                        r"groupMenu|groupChildMenu|subMenu)\s*=", raw_j, re.I):
+                break
+            fm = re.match(r'^field\s*=\s*"[^"]*"\s*,\s*([A-Za-z_]\w*)', raw_j, re.I)
+            if fm:
+                owned.add(fm.group(1))
+        return owned
+
+    for i, raw in enumerate(ini.lines):
+        line = strip_comment(raw).strip()
+        m = re.match(r'^subMenu\s*=\s*([A-Za-z0-9_.]+)\s*,\s*"[^"]*"\s*,\s*0\s*,'
+                     r'\s*\{([^}]*)\}', line, re.I)
+        if not m:
+            continue
+        target, cond = m.group(1), m.group(2)
+        owned = _dialog_owned_fields(target)
+        if not owned:
+            continue
+        named = set(re.findall(r"[A-Za-z_]\w*", cond))
+        clash = named & owned
+        if clash:
+            rep.error("MENU-SELF-GATED",
+                      f"'{target}' is hidden by a condition it controls itself "
+                      f"({', '.join(sorted(clash))}). The menu item is greyed out until that "
+                      f"setting is on, but this dialog is the only place to turn it on - so the "
+                      f"feature is unreachable. Drop the gate, as LaunchControl/lttSettings do.",
+                      i + 1)
+
+    # ---- [Constants] declaration syntax -------------------------------------
+    # The layout checks above deliberately ignore field syntax, so a malformed
+    # declaration passes here and only fails when TunerStudio loads the ini - which is
+    # exactly what happened with `rtCurveLabel = string, ASCII, 16, [20], "Axis label"`:
+    # the string class takes a plain length as its 4th field, not a [shape]. Catching it
+    # here costs one regex per line and saves a hardware-in-the-loop trip.
+    #
+    # These checks are deliberately *structural* only. Trailing arguments are optional in
+    # practice (`divider = scalar, U08, 25, "", 1.0, 0.0` is a real, working entry with no
+    # lo/hi/digits), so argument counts are not policed - only the things that make
+    # TunerStudio reject the page outright.
+    # Only the page declaration bodies are field declarations. The [Constants] header
+    # (nPages, pageSize, burnCommand, blockingFactor, ...) is controller protocol
+    # configuration, not a field, and must not be validated as one.
+    in_page_body = False
+    for i, raw in enumerate(ini.lines):
+        if ini.section_of[i] != SECTION_CONSTANTS:
+            in_page_body = False
+            continue
+        line = strip_comment(raw).strip()
+        if re.match(r"^page\s*=", line, re.I):
+            in_page_body = True
+            continue
+        if not in_page_body or not line or line.startswith("#"):
+            continue
+
+        m = RE_CONST_DECL.match(line)
+        if not m:
+            if "=" in line:
+                rep.error("CONST-MALFORMED",
+                          f"[Constants] line is not a valid declaration: {line[:70]!r}", i + 1)
+            continue
+
+        name, cls, ctype, rest = m.group(1), m.group(2).lower(), m.group(3), m.group(4)
+        if ctype.upper() not in VALID_CONST_TYPES:
+            rep.error("CONST-BAD-TYPE",
+                      f"{name}: unknown type {ctype!r} (expected one of "
+                      f"{', '.join(sorted(VALID_CONST_TYPES))})", i + 1)
+
+        args = split_args(rest)
+        if not args or not args[0]:
+            rep.error("CONST-NO-OFFSET", f"{name}: no offset given", i + 1)
+            continue
+
+        if cls == "string":
+            # Spec: name = string, ASCII, offset, length [, displayColumns]
+            if len(args) < 2:
+                rep.error("CONST-STRING-NO-LENGTH",
+                          f"{name}: string needs a length, e.g. "
+                          f"`{name} = string, ASCII, {args[0]}, 20`", i + 1)
+            elif not re.fullmatch(r"\d+", args[1]):
+                rep.error("CONST-STRING-BAD-LENGTH",
+                          f"{name}: string length must be a plain integer, got {args[1]!r}. "
+                          f"A [shape] is array/bits syntax and makes TunerStudio reject "
+                          f"the page.", i + 1)
+            elif len(args) > 3:
+                rep.error("CONST-STRING-EXTRA",
+                          f"{name}: string takes at most length + displayColumns, got "
+                          f"{len(args)} arguments", i + 1)
+        elif cls == "scalar":
+            if len(args) > 1 and args[1].startswith("["):
+                rep.error("CONST-SCALAR-SHAPE",
+                          f"{name}: scalar must not take a [shape]; use array", i + 1)
+        elif cls == "array":
+            if len(args) > 1 and not args[1].startswith("["):
+                rep.error("CONST-ARRAY-NO-SHAPE",
+                          f"{name}: array needs a [shape] as its second field, got "
+                          f"{args[1]!r}", i + 1)
+        elif cls == "bits":
+            if len(args) > 1 and not args[1].startswith("["):
+                rep.error("CONST-BITS-NO-RANGE",
+                          f"{name}: bits needs a [lo:hi] range as its second field, got "
+                          f"{args[1]!r}", i + 1)
 
     # ---- constants integrity digest ----------------------------------------
     digest = constants_digest(ini)

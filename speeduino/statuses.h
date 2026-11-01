@@ -399,6 +399,24 @@ struct statuses {
   uint8_t systemTemp;
   uint32_t revolutionTime; //The time in uS that one revolution would take at current speed (The time tooth 1 was last seen, minus the time it was seen prior to that). Zero if the speed is unknown
 
+  /** @brief FND-05: milliseconds since the configured start release.
+   *
+   * Zero when the clock is not running. Published to TunerStudio as two U16 channels
+   * (`raceTimeLo` / `raceTimeHi`) because the live-data packet carries no 32-bit field, and
+   * 16 bits alone would wrap every 65.5 s - too short to cover a pass plus the shutdown.
+   *
+   * Written only by raceTimeTick1ms(), which runs on the 1 kHz gate. Readers in the main loop
+   * must treat the value as tearing when they need more than 16 bits; in practice every
+   * consumer is itself in the main loop, so pairs are read from the same pass.
+   */
+  uint32_t raceTimeMs;
+  /** @brief FND-05: the state machine state, as @ref RaceTimeState. */
+  uint8_t raceTimeState;
+  /** @brief FND-05: 'R' + bit0 false start + bits 1-3 the winning retard producer. */
+  uint8_t raceTimeStatus;
+  /** @brief FND-09: the retard the arbiter actually applied, whole degrees. */
+  uint8_t torqueRetardActive;
+
   uint8_t maxIgnOutputs; /**< Number of ignition outputs being used by the current tune configuration */
   uint8_t injLayout : 3; ///< Normally the same value as config2::injLayout, but under some situations will change to one of the other INJ_* constants
   num_injector_t injOutputs;

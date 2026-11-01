@@ -29,6 +29,7 @@ There are 2 top level functions that call more detailed corrections for Fuel and
 #include "timers.h"
 #include "maths.h"
 #include "ltt.h"
+#include "torqueRequest.h"
 #include "sensors.h"
 #include "unit_testing.h"
 #include "preprocessor.h"
@@ -1438,6 +1439,17 @@ int8_t correctionsIgn(int8_t base_advance)
   advance = correctionKnockTiming(advance, micros(), getAnalogKnock);
 
   advance = correctionDFCOignition(advance);
+
+  // FND-09: apply the arbitrated torque-reduction request LAST among the retards, so that
+  // whatever wins arbitration is the value the engine actually sees. See torqueRequest.h for
+  // why this is the largest single request rather than a sum: two systems each asking for 10
+  // degrees mean "remove at least 10", not 20, and summing is how a launch retard plus a
+  // traction retard ends up commanding negative advance at the top of a pass.
+  //
+  // The producers publish during their own update; nothing is published here.
+  const int8_t arbitratedRetard = torqueBusRetard();
+  currentStatus.torqueRetardActive = (uint8_t)arbitratedRetard;
+  advance = (int8_t)(advance - arbitratedRetard);
 
   //Fixed timing check must go last
   advance = correctionFixedTiming(advance);

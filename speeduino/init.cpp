@@ -5,6 +5,7 @@
 #include "init.h"
 #include "storage.h"
 #include "ltt.h"
+#include "raceTime.h"
 #include "updates.h"
 #include "timers.h"
 #include "comms.h"
@@ -152,6 +153,12 @@ void initialiseAll(void)
     lttInit();
 #if defined(CORE_TEENSY) && defined(USE_SPI_EEPROM)
     boardBootTrace(0x37); // long-term trims loaded
+#endif
+    // Same treatment for the race-time block: above 0x1000, own header, must be able to
+    // refuse to load on a storage backend too small to hold it.
+    initialiseRaceTime(currentStatus);
+#if defined(CORE_TEENSY) && defined(USE_SPI_EEPROM)
+    boardBootTrace(0x38); // race-time block loaded
 #endif
 #endif
 

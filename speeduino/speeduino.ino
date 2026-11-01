@@ -29,6 +29,8 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #include "maths.h"
 #include "corrections.h"
 #include "ltt.h"
+#include "raceTime.h"
+#include "torqueRequest.h"
 #include "timers.h"
 #include "decoders.h"
 #include "src/controllers/idle/idle.h"
@@ -294,6 +296,29 @@ BEGIN_LTO_ALWAYS_INLINE(void) loop(void)
       if( (isEepromWritePending() == true) && (serialStatusFlag == SERIAL_INACTIVE) && storageWriteTimeoutExpired()) { saveAllPages(); } 
     }
     updateLaunchAndFlatShift(currentStatus, configPage2, configPage6, configPage10, configPage15);
+
+    // FND-09 torque-reduction bus. Cleared and re-published EVERY pass, deliberately ungated:
+    // the bus has no "cancel", so a producer that stops running simply stops publishing and its
+    // request disappears. Resetting only on the 1 kHz pass would make the arbitrated retard
+    // flicker between passes and put a jitter on the ignition advance.
+    torqueBusReset();
+    // FND-05's reference consumer: retard vs race time. Cheap when the curve is off.
+    torqueRequestRetard(TorqueProducer::RaceTime, (int8_t)raceTimeCurveRetard());
+
+    // FND-05 race-time framework. Ticked from the 1 kHz bit because it IS the millisecond
+    // base - running it at any other rate makes currentStatus.raceTimeMs a lie, and every
+    // consumer inherits the error. Nothing is gated more coarsely than this on purpose.
+    if (BIT_CHECK(currentStatus.LOOP_TIMER, BIT_TIMER_1KHZ))
+    {
+      raceTimeUpdate(currentStatus);
+
+      // Republish the clock and state every millisecond so a consumer reading them from the
+      // same pass sees a coherent snapshot.
+      currentStatus.raceTimeMs = raceTimeGetMs();
+      currentStatus.raceTimeState = (uint8_t)raceTimeGetState();
+      currentStatus.raceTimeStatus = (uint8_t)(((raceTimeIsFalseStart() ? 1U : 0U))
+                                   | ((uint8_t)torqueBusRetardProducer() << 1U));
+    }
     if (BIT_CHECK(currentStatus.LOOP_TIMER, BIT_TIMER_15HZ)) //Every 32 loops
     {
       #if defined(NATIVE_CAN_AVAILABLE)
