@@ -63,8 +63,15 @@ SEPARATOR = "std_separator"
 # Anything else changing this digest means a real offset may have moved, which
 # silently invalidates existing .msq files. Update this constant only after
 # deliberately confirming that.
-EXPECTED_CONSTANTS_DIGEST = "179894c5f6cba54c"
+EXPECTED_CONSTANTS_DIGEST = "7338d7cc9a4c09c6"
 
+# Why this changed (from 179894c5f6cba54c):
+#   rtStopSpeed and rtFalseStartSpeed changed UNITS from km/h to mph. Both are new page-17
+#   fields with no tunes in existence, so this reinterprets no stored value - but it is still a
+#   semantic change to a declared constant, which is exactly what this digest is for. Same
+#   offsets (10 and 12), same U16 width, same scales; only the units string differs. The
+#   firmware now converts mph -> km/h at the comparison, since currentStatus.vss is km/h.
+#
 # Why this changed (from c2f00b138a6e456b):
 #   rtArmPin changed from `scalar, U08, 1, "", ...` to the same 6-bit dropdown form used by
 #   vssPin / knock_pin / n2o_arming_pin: `bits, U08, 1, [0:5], $IO_Pins_no_def` plus a

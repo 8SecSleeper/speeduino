@@ -74,8 +74,21 @@ constexpr uint16_t EEPROM_RACETIME_BASE = 0x1820;
 /** @brief 'RACE'. Detects "never initialised" vs "corrupt". */
 constexpr uint32_t EEPROM_RACETIME_MAGIC = 0x52414345;
 
-/** @brief Layout version. Bump when the block layout changes; older data is then discarded. */
-constexpr uint8_t EEPROM_RACETIME_VERSION = 1;
+/**
+ * @brief Layout version. Bump whenever the payload layout changes.
+ *
+ * A stale block whose version does not match is discarded and replaced with defaults.
+ *
+ * v1 -> v2: the curve gained a stored time axis (`curveTimeMs`, offsets 36..67) and
+ * `curveRetard` moved from offset 48 to 68. The payload is still 256 bytes, so a v1 block
+ * passes every size assertion and its CRC still matches its own bytes - only the meaning
+ * changed. Reading one as a v2 block is exactly what produced 2147483647 in every curve cell
+ * and nonsense in the threshold fields.
+ *
+ * The CRC cannot catch this on its own: it validates integrity, not meaning. The version byte
+ * is the only thing that distinguishes "written by an older build" from "corrupt".
+ */
+constexpr uint8_t EEPROM_RACETIME_VERSION = 2;
 
 /** @brief Size of the block header, in bytes. Must stay a multiple of 2 for alignment. */
 constexpr uint16_t EEPROM_RACETIME_HEADER_SIZE = 16;
@@ -83,6 +96,21 @@ constexpr uint16_t EEPROM_RACETIME_HEADER_SIZE = 16;
 /** @brief EEPROM address of the TunerStudio-visible payload (immediately after the header). */
 constexpr uint16_t EEPROM_RACETIME_PAYLOAD = EEPROM_RACETIME_BASE + EEPROM_RACETIME_HEADER_SIZE;
 /// @}
+
+/**
+ * @brief Miles per hour to kilometres per hour, expressed as a fraction.
+ *
+ * 1 mph = 1.609344 km/h exactly. Keeping it as numerator/denominator avoids a float on a 1 kHz
+ * path and avoids a rounded integer constant.
+ *
+ * The numerator MUST be 32-bit: 160934 does not fit in uint16_t and silently truncates to
+ * 29862, which turns a 10 mph threshold into 2 km/h. That bug was caught by the threshold
+ * boundary tests, not by any build - a narrower type here compiles cleanly and is simply wrong.
+ */
+constexpr uint32_t MPH_TO_KMH_NUM = 160934U; ///< 1.60934 scaled by 1e5
+constexpr uint32_t MPH_TO_KMH_DEN = 100000U;
+static_assert(MPH_TO_KMH_NUM > 65535U,
+              "MPH_TO_KMH_NUM must be 32-bit; a 16-bit type truncates it silently");
 
 /// @name Payload geometry
 /// @{
@@ -157,8 +185,8 @@ struct raceTimeConfig : public config_page_t {
   uint8_t curveEnable;      ///< Non-zero enables the retard-vs-race-time consumer.
 
   uint16_t stopTimeMs;      ///< Stop threshold for @ref RT_STOP_TIME, ms.
-  uint16_t stopSpeed;       ///< Stop threshold for @ref RT_STOP_SPEED, same units as `vss`.
-  uint16_t falseStartSpeed; ///< Movement above this before the start release is a false start.
+  uint16_t stopSpeed;       ///< Stop threshold for @ref RT_STOP_SPEED, in MPH.
+  uint16_t falseStartSpeed; ///< Movement above this, in MPH, before the start release is a false start.
   uint16_t reserved00;      ///< Reserved, must be 0.
 
   uint8_t curveLabel[RACETIME_LABEL_LEN]; ///< User-editable axis label, NUL terminated.

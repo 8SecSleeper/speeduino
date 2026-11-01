@@ -175,14 +175,16 @@ void test_stop_above_speed(void)
 {
   raceTimeFixture f;
   raceTimeGetPageMutable().stopSource = RT_STOP_SPEED;
-  raceTimeGetPageMutable().stopSpeed = 200;
+  raceTimeGetPageMutable().stopSpeed = 100;   // mph
   f.completeLaunch(0);
 
-  f.current.vss = 199;
+  // 100 mph converts to 160 km/h with integer truncation (exactly 160.934). So the
+  // threshold is 160 and vss==160 must already stop - the comparison is >=.
+  f.current.vss = 159;
   f.advance(10);
   TEST_ASSERT_EQUAL(RT_STATE_RUNNING, raceTimeGetState());
 
-  f.current.vss = 200;
+  f.current.vss = 160;
   f.advance(1);
   TEST_ASSERT_EQUAL(RT_STATE_STOPPED, raceTimeGetState());
 }
@@ -233,14 +235,14 @@ void test_false_start_threshold_is_respected(void)
 {
   raceTimeFixture f;
   raceTimeGetPageMutable().motionSource = RT_MOTION_VSS;
-  raceTimeGetPageMutable().falseStartSpeed = 10;
+  raceTimeGetPageMutable().falseStartSpeed = 10;   // mph -> 16.09 km/h
 
   raceTimeTick1ms(f.current, true);
-  f.current.vss = 10; // at the threshold, not above it
+  f.current.vss = 16; // km/h; 10 mph truncates to exactly 16, and the test is strict >
   raceTimeTick1ms(f.current, true);
   TEST_ASSERT_EQUAL(RT_STATE_ARMED, raceTimeGetState());
 
-  f.current.vss = 11;
+  f.current.vss = 17; // km/h, above the truncated 16 km/h threshold
   raceTimeTick1ms(f.current, true);
   TEST_ASSERT_EQUAL(RT_STATE_FALSE_START, raceTimeGetState());
 }

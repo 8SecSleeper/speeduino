@@ -87,7 +87,7 @@ static void setPageToDefaults(void)
 
   raceTimeData.stopTimeMs = 0U;
   raceTimeData.stopSpeed = 0U;
-  raceTimeData.falseStartSpeed = 2U;
+  raceTimeData.falseStartSpeed = 2U;               // mph (~3.2 km/h): staged is stationary
 
   // 16 points over 6 s. Retard off the line for traction, then give it back: 12 degrees of pull
   // at the hit, easing to 0 by 3.2 s. This is the shape a turbo drag car actually runs, not a
@@ -169,6 +169,20 @@ static bool probeStorage(void)
 {
   const uint16_t length = getStorageAPI().length();
   return (uint32_t)length >= ((uint32_t)EEPROM_RACETIME_BASE + (uint32_t)RACETIME_BLOCK_SIZE);
+}
+
+/**
+ * @brief Convert a configured MPH threshold to the km/h that `currentStatus.vss` is in.
+ *
+ * The tuner sets these in mph because that is what a drag car's dash reads, and the firmware
+ * compares against vss, which is km/h. Converting here keeps the stored value in the unit the
+ * tuner typed.
+ *
+ * Integer arithmetic on purpose: this runs on the 1 kHz path.
+ */
+static uint32_t mphToKmh(uint16_t mph)
+{
+  return ((uint32_t)mph * (uint32_t)MPH_TO_KMH_NUM) / MPH_TO_KMH_DEN;
 }
 
 /** @brief Reset the clock and state machine, keeping the configuration untouched. */
@@ -521,8 +535,11 @@ static bool motionDetected(const statuses &current)
   {
     // A threshold of 0 with a source selected means "any non-zero speed counts". That is the
     // useful default: a staged car is stationary, so the smallest reading is already a fault.
-    const uint16_t threshold = raceTimeData.falseStartSpeed;
-    return current.vss > threshold;
+    //
+    // The threshold is configured in MPH; `vss` is in km/h, so it is converted here rather than
+    // asking the tuner to enter a number in a unit their dash does not show.
+    const uint32_t thresholdKmh = mphToKmh(raceTimeData.falseStartSpeed);
+    return (uint32_t)current.vss > thresholdKmh;
   }
 
   if (source == (uint8_t)RT_MOTION_ARM_PIN)
@@ -615,7 +632,11 @@ void raceTimeTick1ms(statuses &current, bool pinHigh)
           break;
 
         case RT_STOP_SPEED:
-          if (current.vss >= raceTimeData.stopSpeed) { raceTimeState = RT_STATE_STOPPED; }
+          // stopSpeed is configured in MPH; vss is in km/h.
+          if ((uint32_t)current.vss >= mphToKmh(raceTimeData.stopSpeed))
+          {
+            raceTimeState = RT_STATE_STOPPED;
+          }
           break;
 
         case RT_STOP_NONE:
