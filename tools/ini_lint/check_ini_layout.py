@@ -63,8 +63,21 @@ SEPARATOR = "std_separator"
 # Anything else changing this digest means a real offset may have moved, which
 # silently invalidates existing .msq files. Update this constant only after
 # deliberately confirming that.
-EXPECTED_CONSTANTS_DIGEST = "7338d7cc9a4c09c6"
+EXPECTED_CONSTANTS_DIGEST = "24fc7b7d213a1f5f"
 
+# Why this changed (from 29cdd08ac19aec9e):
+#   Page 17's six spare-bit masks were relabelled from all-"INVALID" to all-"Unused". A 2-bit
+#   field with four INVALID options has no valid option for TunerStudio to map a saved value
+#   onto, which produces "Failed to set value ... No valid options found". Same bits, same
+#   offsets; only the labels changed, so nothing stored is affected.
+#
+# Why this changed (from 7338d7cc9a4c09c6):
+#   The per-page protocol lists (pageIdentifier, pageReadCommand, burnCommand,
+#   pageValueWrite, pageChunkWrite, crc32CheckCommand) gained a 17th entry. They had been left
+#   at 16 when page 17 was added, so TunerStudio had no burn command for page 17 and every edit
+#   to the race-time page silently failed to save. No field OFFSET moved: these are controller
+#   protocol tables, not tune constants, so no .msq is affected.
+#
 # Why this changed (from 179894c5f6cba54c):
 #   rtStopSpeed and rtFalseStartSpeed changed UNITS from km/h to mph. Both are new page-17
 #   fields with no tunes in existence, so this reinterprets no stored value - but it is still a
@@ -605,6 +618,41 @@ def check(path: str, strict: bool, verbose: bool) -> int:
             rep.info("UNREACHABLE",
                      f"{kind} '{name}' is defined but not reachable from "
                      "[Menu]", idx + 1)
+
+    # ---- page protocol tables all agree on page count ----------------------
+    # [Constants] declares nPages plus a parallel list per page for pageSize, pageIdentifier,
+    # pageReadCommand, burnCommand, pageValueWrite, pageChunkWrite and crc32CheckCommand.
+    # If any list is short, TunerStudio has no command for that page - and the symptom is not
+    # an error, it is that edits to that page silently never save. That happened when page 17
+    # was added and only nPages/pageSize were extended.
+    page_lists = ("pageSize", "pageIdentifier", "pageReadCommand", "burnCommand",
+                  "pageValueWrite", "pageChunkWrite", "crc32CheckCommand")
+    declared_npages = None
+    for i, raw in enumerate(ini.lines):
+        stripped = strip_comment(raw).strip()
+        m = re.match(r"^nPages\s*=\s*(\d+)", stripped, re.I)
+        if m:
+            declared_npages = int(m.group(1))
+            break
+
+    if declared_npages:
+        for key in page_lists:
+            for i, raw in enumerate(ini.lines):
+                stripped = strip_comment(raw).strip()
+                m = re.match(r"^" + key + r"\s*=\s*(.+)$", stripped, re.I)
+                if not m:
+                    continue
+                value = m.group(1)
+                count = (len(re.findall(r'"(?:[^"\\]|\\.)*"', value))
+                         if key != "pageSize"
+                         else len([v for v in value.split(",") if v.strip()]))
+                if count != declared_npages:
+                    rep.error("PAGE-TABLE-SHORT",
+                              f"{key} has {count} entries but nPages={declared_npages}. "
+                              f"TunerStudio will have no command for page(s) "
+                              f"{count + 1}..{declared_npages}, so edits to them silently "
+                              f"never save.", i + 1)
+                break
 
     # ---- OutputChannels fit inside ochBlockSize ----------------------------
     # A channel index N is the Nth byte of the live-data payload, and a multi-byte scalar at N

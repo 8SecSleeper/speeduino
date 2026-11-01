@@ -300,6 +300,40 @@ static void test_racetime_block_is_self_consistent_after_save(void)
     TEST_ASSERT_EQUAL_UINT8(RT_DISABLED, raceTimeGetPage().enable);
 }
 
+
+/** @brief The round trip a tuner actually performs: write via the page layer, burn, power cycle.
+ *
+ * This is the one that matters. Writing through setPageValue() and burning through savePage()
+ * exercise different code paths from a direct raceTimeSave(), and "my settings do not stick"
+ * is the failure a tuner reports.
+ */
+static void test_racetime_page_settings_survive_a_burn(void)
+{
+    setStorageAPI(getMemoryStorageApi(MEMORY_STORAGE_CAPACITY, MEMORY_STORAGE_CAPACITY, 0xFF));
+    initialiseRaceTime(currentStatus);
+
+    // Write as TunerStudio does: through the page layer, byte by byte.
+    TEST_ASSERT_TRUE(setPageValue(raceTimePage, 0U, 1U));   // rtEnable = on
+    TEST_ASSERT_TRUE(setPageValue(raceTimePage, 1U, 36U));  // rtArmPin = 36
+    TEST_ASSERT_TRUE(setPageValue(raceTimePage, 2U, 0U));   // polarity high
+    TEST_ASSERT_TRUE(setPageValue(raceTimePage, 10U, 120U));// rtStopSpeed low byte = 120
+
+    TEST_ASSERT_EQUAL_UINT8(1U, raceTimeGetPage().enable);
+    TEST_ASSERT_EQUAL_UINT8(36U, raceTimeGetPage().armPin);
+
+    // Burn just this page, then simulate a power cycle.
+    savePage(raceTimePage);
+    TEST_ASSERT_FALSE_MESSAGE(isEepromWritePending(), "page 17 left the burn pending");
+    TEST_ASSERT_FALSE_MESSAGE(raceTimeNeedsSave(), "page 17 still differs from storage after a burn");
+
+    memset(&raceTimeData, 0, sizeof(raceTimeData));  // lose RAM as a power cycle would
+    initialiseRaceTime(currentStatus);
+
+    TEST_ASSERT_EQUAL_MESSAGE(1U, raceTimeGetPage().enable, "rtEnable did not survive the burn");
+    TEST_ASSERT_EQUAL_MESSAGE(36U, raceTimeGetPage().armPin, "rtArmPin did not survive the burn");
+    TEST_ASSERT_EQUAL_MESSAGE(120U, raceTimeGetPage().stopSpeed, "rtStopSpeed did not survive the burn");
+}
+
 void testBurnLoop(void)
 {
     SET_UNITY_FILENAME() {
@@ -316,5 +350,6 @@ void testBurnLoop(void)
         RUN_TEST(test_racetime_page_consumes_budget);
         RUN_TEST(test_racetime_page_is_noop_when_unchanged);
         RUN_TEST(test_racetime_block_is_self_consistent_after_save);
+        RUN_TEST(test_racetime_page_settings_survive_a_burn);
     }
 }
