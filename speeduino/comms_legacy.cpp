@@ -816,7 +816,9 @@ void sendValuesLegacy(void)
   bytestosend -= primarySerial.write(99); // knock
   bytestosend -= primarySerial.write(99); // knock
 
-  temp = currentStatus.egoCorrection * 10;
+  // egoCorrection is signed about zero internally; this legacy frame predates that and
+  // carries the 100 == no-change scale multiplied by 10. Convert at the boundary.
+  temp = (currentStatus.egoCorrection + 100) * 10;
   bytestosend -= primarySerial.write(temp>>8); // egocor1
   bytestosend -= primarySerial.write(temp); // egocor1
   bytestosend -= primarySerial.write(temp>>8); // egocor2

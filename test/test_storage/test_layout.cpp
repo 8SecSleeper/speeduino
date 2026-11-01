@@ -14,6 +14,20 @@ extern const uint16_t MAX_PAGE_ADDRESS;
 extern const uint16_t STORAGE_SIZE;
 extern uint16_t getSensorCalibrationAddress(SensorCalibrationTable sensor, SensorCalibrationTableElement element);
 
+/** @brief First address of the custom data block, above the frozen core tune ABI.
+ *
+ * Per AGENTS.md 2A: 0x0000-0x0FFF is the core tune and must never move; everything new
+ * lives at 0x1000 and above.
+ */
+constexpr uint16_t EEPROM_CUSTOM_BASE = 0x1000;
+
+/** @brief Size of the emulated EEPROM on the target board (768 sectors x 31 bytes).
+ *
+ * See AGENTS.md 2.1 - the hard ceiling for the W25Q32 at 1 MB base is 23,808 bytes,
+ * highest address 0x5CFF. Any custom entity must fit below this.
+ */
+constexpr uint16_t EEPROM_EMULATED_SIZE = 23808U;
+
 static void test_getEntityStartAddress_invalid_entity(void) {
     config10 localPage10;
     page_iterator_t iter(page_entity_t(entity_t(&localPage10, sizeof(localPage10)), 0U), entity_page_location_t(2, 1));
@@ -65,7 +79,36 @@ static uint8_t test_no_overlap_page(uint8_t pageNum, block blocks[], size_t leng
 
         block newBlock = { getEntityStartAddress(iter), iter.entity.size };
         TEST_ASSERT_GREATER_THAN(0, newBlock.start);
-        TEST_ASSERT_LESS_THAN(MAX_PAGE_ADDRESS, newBlock.start+newBlock.length);
+
+        // Two storage regions are legal, and an entity must be wholly inside one of them:
+        //
+        //  1. The frozen core tune block: 0x0000 .. MAX_PAGE_ADDRESS. Its absolute offsets
+        //     are baked into every .msq and into the INI, so nothing may move.
+        //  2. The custom block at 0x1000 and above, per AGENTS.md 2A. Everything added from
+        //     now on lives here.
+        //
+        // The old form of this assertion required EVERY entity to be below MAX_PAGE_ADDRESS,
+        // which encoded the pre-2A assumption that all data lived in the core block. The
+        // long-term trim block is deliberately above it, so that form is now wrong - but the
+        // thing it was really protecting (no overlaps, nothing out of range) still matters.
+        const uint16_t blockEnd = (uint16_t)(newBlock.start + newBlock.length);
+        const bool inCoreBlock = blockEnd <= MAX_PAGE_ADDRESS;
+        const bool inCustomBlock = newBlock.start >= EEPROM_CUSTOM_BASE;
+
+        char rangeMsg[96];
+        snprintf(rangeMsg, _countof(rangeMsg)-1,
+                 "EEPROM storage: entity %" PRIu8 " [%u..%u) is in neither the core block nor the custom block",
+                 idxCurrBlock, (unsigned)newBlock.start, (unsigned)blockEnd);
+        TEST_ASSERT_TRUE_MESSAGE(inCoreBlock || inCustomBlock, rangeMsg);
+
+        if (inCustomBlock) {
+            char customMsg[96];
+            snprintf(customMsg, _countof(customMsg)-1,
+                     "EEPROM storage: custom entity %" PRIu8 " [%u..%u) runs past the emulated EEPROM",
+                     idxCurrBlock, (unsigned)newBlock.start, (unsigned)blockEnd);
+            TEST_ASSERT_LESS_OR_EQUAL_MESSAGE(EEPROM_EMULATED_SIZE, blockEnd, customMsg);
+        }
+
         assert_nocalibration_overlap(newBlock, idxCurrBlock);
         uint8_t overlapBlock = find_overlap(blocks, idxCurrBlock, newBlock);
         if (overlapBlock!=idxCurrBlock) {

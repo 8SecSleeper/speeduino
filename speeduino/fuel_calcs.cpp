@@ -5,6 +5,7 @@
 #include "decoders.h"
 #include "units.h"
 #include "scheduler_fuel_controller.h"
+#include "ltt.h"
 
 TESTABLE_INLINE_STATIC uint16_t calculateRequiredFuel(const config2 &page2, const statuses &current) {
   uint16_t reqFuel = page2.reqFuel * 100U; //Convert to uS and an int. This is the only variable to be used in calculations
@@ -114,6 +115,26 @@ static inline uint32_t applyCorrections(uint32_t intermediate, uint16_t correcti
   return percentageApprox(corrections, intermediate); 
 }
 
+/** @brief Apply the long-term fuel trim for the current operating point.
+ *
+ * This is the *only* place the trim enters the fuelling calculation. It sits after the MAP
+ * and AFR multipliers and before the aggregate corrections, which matters for two reasons:
+ *
+ *  1. It is outside sumCorrections(), so it is not inside the feedback path that produces it.
+ *     A trim inside its own control loop integrates against its own output and diverges.
+ *  2. It is applied to the same intermediate the VE lookup produced, so trunkating both makes
+ *     the learned value converge to the VE the engine actually needs rather than absorbing a
+ *     fixed error forever.
+ *
+ * A trim of 0 returns the input bit-identically, so an untouched ECU fuels exactly as it did
+ * before this feature existed.
+ */
+static inline uint32_t applyLongTermTrim(uint32_t intermediate, const config10 &page10, const statuses &current) {
+  const uint8_t table = lttActiveTableIndex(page10, current);
+  const int16_t trimUnits = lttGetSlewedTrimUnits(table, fuelTable, current.fuelLoad, current.RPM);
+  return lttApplyTrim(intermediate, trimUnits);
+}
+
 static inline uint16_t computeInitialPw(uint16_t REQ_FUEL, uint8_t VE) {
   // REQ_FUEL max is 255*100 = 25500
   // VE max is 255
@@ -143,15 +164,16 @@ TESTABLE_INLINE_STATIC uint16_t calcPrimaryPulseWidth(uint16_t injOpenTime, cons
     includeAe(
       includeOpenTime(
         applyCorrections(
-          applyAFRMultiplier(
-            applyMapMode(
-              computeInitialPw(REQ_FUEL, current.VE), 
-              page2, current),
-            page2, page6, current), 
+          applyLongTermTrim(
+            applyAFRMultiplier(
+              applyMapMode(
+                computeInitialPw(REQ_FUEL, current.VE), 
+                page2, current),
+              page2, page6, current),
+            page10, current),
         current.corrections), 
       injOpenTime), 
       REQ_FUEL, page2, current);
-
   // Make sure this won't overflow when we convert to uInt. This means the maximum pulsewidth possible is 65.535mS
   return pwApplyNitrous((uint16_t)(std::min)(intermediate, (uint32_t)UINT16_MAX), page10, current);
 }

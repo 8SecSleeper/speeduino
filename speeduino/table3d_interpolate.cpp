@@ -109,6 +109,72 @@ static inline row_col2d toBottomLeft(const row_col2d &topRight, const table3d_di
   return { (table3d_dim_t)(topRight.row - axisSize), (table3d_dim_t)(topRight.col - UINT8_C(1)) };
 }
 
+/** @brief Combine 4 corner values with pre-computed QU1X8 bin weights.
+ *
+ * Shared by the uint8 and the signed int16 interpolation paths so the weighting can
+ * never drift between them. The arithmetic is performed in int32_t: the widest input is
+ * a signed 16-bit corner (magnitude 32768) scaled by QU1X8_ONE (256), giving 8,388,608 -
+ * comfortably inside int32_t. Accumulating four of those cannot overflow either, because
+ * the four weights sum to exactly QU1X8_ONE.
+ *
+ * @return The weighted sum, still in QU1X8 fixed point (the caller shifts it down).
+ */
+template <typename TValue>
+static inline int32_t combine_corners(const TValue &tl,
+                                      const TValue &tr,
+                                      const TValue &bl,
+                                      const TValue &br,
+                                      const QU1X8_t &m,
+                                      const QU1X8_t &n,
+                                      const QU1X8_t &o,
+                                      const QU1X8_t &r) {
+  return ((int32_t)tl * (int32_t)m)
+       + ((int32_t)tr * (int32_t)n)
+       + ((int32_t)bl * (int32_t)o)
+       + ((int32_t)br * (int32_t)r);
+}
+
+/** @brief Round a QU1X8-fixed value to an integer by truncation.
+ *
+ * The unsigned path has always used a plain truncating shift. For the non-negative values
+ * the uint8 tables can hold that is "round down", and the existing interpolator test
+ * expectations were written against it, so it must not change. The signed path owns the
+ * symmetric rounding below.
+ */
+static inline table3d_value_t fromQU1X8_round_down(int32_t fixedValue) {
+  return (table3d_value_t)fromQU1X8((uint32_t)fixedValue);
+}
+
+/** @brief Round a QU1X8-fixed value to the nearest integer, half away from zero.
+ *
+ * Symmetric about zero is required for the trim tables: a trim of exactly 0 must
+ * interpolate to exactly 0 (so "no trim" is bit-exact and costs nothing), and a trim
+ * cell surrounded by equal values must reproduce that value exactly.
+ */
+static inline int16_t fromQU1X8_round_symmetric(int32_t fixedValue) {
+  if (fixedValue >= 0) {
+    return (int16_t)((fixedValue + (int32_t)QU1X8_HALF) >> QU1X8_INTEGER_SHIFT);
+  }
+  return (int16_t)(-(((-fixedValue) + (int32_t)QU1X8_HALF) >> QU1X8_INTEGER_SHIFT));
+}
+
+/** @brief The 4 corner weights of a bilinear interpolation, in QU1X8 fixed point. */
+struct bilinear_weights {
+  QU1X8_t m;  ///< Weight for the top right corner
+  QU1X8_t n;  ///< Weight for the bottom right corner
+  QU1X8_t o;  ///< Weight for the top left corner
+  QU1X8_t r;  ///< Weight for the bottom left corner
+};
+
+static inline bilinear_weights compute_bilinear_weights(const QU1X8_t &dx, const QU1X8_t &dy) {
+  return {
+    mulQU1X8(QU1X8_ONE-dx, dy),           // m: tr
+    mulQU1X8(dx, dy),                     // n: br
+    mulQU1X8(QU1X8_ONE-dx, QU1X8_ONE-dy), // o: tl
+    mulQU1X8(dx, QU1X8_ONE-dy)            // r: bl
+  };
+}
+
 /**
  * @brief 2d interpolation, given 4 corner values and x/y percentages
  *
@@ -138,13 +204,8 @@ TESTABLE_INLINE_STATIC table3d_value_t bilinear_interpolation( const table3d_val
                                                       const table3d_value_t &br,
                                                       const QU1X8_t &dx,
                                                       const QU1X8_t &dy) {
-  // Compute corner weights
-  const QU1X8_t m = mulQU1X8(QU1X8_ONE-dx, dy);
-  const QU1X8_t n = mulQU1X8(dx, dy);
-  const QU1X8_t o = mulQU1X8(QU1X8_ONE-dx, QU1X8_ONE-dy);
-  const QU1X8_t r = mulQU1X8(dx, QU1X8_ONE-dy);
-  // Apply weights and shift from fixed point
-  return fromQU1X8( (tl * m) + (tr * n) + (bl * o) + (br * r) );
+  const bilinear_weights w = compute_bilinear_weights(dx, dy);
+  return fromQU1X8_round_down(combine_corners(tl, tr, bl, br, w.m, w.n, w.o, w.r));
 }
 
 /**
@@ -214,6 +275,38 @@ TESTABLE_INLINE_STATIC table3d_value_t bilinear_interpolation( const table3d_val
     const QU1X8_t q = compute_bin_position(lookUpValues.y, yBin, yMultiplier);
     return bilinear_interpolation(A, B, C, D, p, q);
   }
+}
+
+int16_t interpolate_3d_value_s16(const xy_pair_t &lookUpValues,
+                    const table3d_dim_t &axisSize,
+                    const int16_t *pValues,
+                    const table3d_bin_t &xBin,
+                    const uint16_t xMultiplier,
+                    const table3d_bin_t &yBin,
+                    const uint16_t yMultiplier)
+{
+  // Cell geometry is identical to the unsigned path - both use the same
+  // row-byte layout and the same top-right / bottom-left corner derivation.
+  const row_col2d tr = toTopRight(xBin, yBin, axisSize);
+  const row_col2d bl = toBottomLeft(tr, axisSize);
+
+  const int16_t A = pValues[tr.row + bl.col]; // top left
+  const int16_t B = pValues[tr.row + tr.col]; // top right
+  const int16_t C = pValues[bl.row + bl.col]; // bottom left
+  const int16_t D = pValues[bl.row + tr.col]; // bottom right
+
+  // Fast path: a flat cell (very common - an untouched trim map is all zeroes)
+  // must return exactly the stored value, not a rounded product.
+  if ((A == B) && (A == C) && (A == D))
+  {
+    return A;
+  }
+
+  const QU1X8_t p = compute_bin_position(lookUpValues.x, xBin, xMultiplier);
+  const QU1X8_t q = compute_bin_position(lookUpValues.y, yBin, yMultiplier);
+
+  const bilinear_weights w = compute_bilinear_weights(p, q);
+  return fromQU1X8_round_symmetric(combine_corners(A, B, C, D, w.m, w.n, w.o, w.r));
 }
 
 /// @}

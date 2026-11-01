@@ -43,6 +43,15 @@ static void test_loadAllPages(void)
     setStorageAPI(getOneByteStorageApi(8192, 8192, BUFFER_MARKER));
     loadAllPages();
     for (uint8_t page = MIN_PAGE_NUM; page<MAX_PAGE_NUM; ++page) {
+        // Page 16 (long-term trims) is deliberately NOT loaded by loadAllPages(). It lives
+        // above the core tune block, carries its own magic/version/CRC header, and must be
+        // able to refuse to load when the storage backend is too small to contain it. That
+        // decision belongs to lttInit() (see speeduino/ltt.cpp), which re-loads page 16 only
+        // after validating the header. Loading it here as well would apply unvalidated trim
+        // data before the CRC had been checked.
+        if (page==lttPage) {
+            continue;
+        }
         assert_page(page, BUFFER_MARKER);
     }
 }

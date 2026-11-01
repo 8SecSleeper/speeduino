@@ -212,7 +212,17 @@ struct statuses {
   int8_t advance2;    /**< The advance value from ignition table 2 */
   uint16_t corrections; /**< The total current corrections % amount */
   uint16_t AEamount;    /**< The amount of acceleration enrichment currently being applied. 100=No change. Varies above 255 */
-  byte egoCorrection; /**< The amount of closed loop AFR enrichment currently being applied */
+  /** @brief Short-term closed-loop fuel trim (STFT), signed percent about zero.
+   *
+   * 0 means "no trim". Positive means the controller is ADDING fuel (the engine was lean
+   * relative to target); negative means it is REMOVING fuel. The previous encoding used
+   * 100 == no trim on an unsigned byte, which made the +/- arithmetic around the authority
+   * limit wrap modulo 256 and made 16% a hard ceiling on authority. Signed-about-zero is
+   * also what lets "trim cell == 0" mean "nothing learned here".
+   *
+   * Range is +/-127, which covers the +/-100 requirement for full-authority closed loop.
+   */
+  int8_t egoCorrection;
   byte wueCorrection; /**< The amount of warmup enrichment currently being applied */
   byte batCorrection; /**< The amount of battery voltage enrichment currently being applied */
   byte iatCorrection; /**< The amount of inlet air temperature adjustment currently being applied */

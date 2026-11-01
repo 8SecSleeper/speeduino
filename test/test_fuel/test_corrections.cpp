@@ -7,6 +7,7 @@
 #include "sensors_map_structs.h"
 #include "units.h"
 #include "fuel_calcs.h"
+#include "ltt.h"
 #include "src/PID/PID.h"
 
 extern byte correctionWUE(void);
@@ -321,7 +322,7 @@ static void test_corrections_floodclear(void)
   RUN_TEST_P(test_corrections_floodclear_crank_above_threshold_active);
 }
 
-uint8_t correctionAFRClosedLoop(void);
+int8_t correctionAFRClosedLoop(void);
 extern uint16_t AFRnextCycle;
 
 static void setup_valid_ego_cycle(void) {
@@ -333,6 +334,15 @@ extern PID egoPID;
 static void setup_ego_simple(void) {
   initialiseCorrections();
   egoPID.resetIntegral(0);
+
+  // The EGO authority now comes from the per-cell long-term-trim authority tables, so the
+  // module has to be in a defined state before any closed-loop test runs. Without this the
+  // authority would be whatever a previous test left behind.
+  lttResetForTest();
+  // These tests exercise the SHORT-TERM controller and use egoLimit as the bound. Open the
+  // long-term authority fully so egoLimit is the binding constraint, isolating the concern
+  // under test. Per-cell authority has its own dedicated tests.
+  setAllLttAuthority(100U);
 
   configPage6.egoType = EGO_TYPE_NARROW;
   configPage6.egoAlgorithm = EGO_ALGORITHM_SIMPLE;
@@ -359,7 +369,8 @@ static void setup_ego_simple(void) {
   currentStatus.MAP = (configPage9.egoMAPMin + ((configPage9.egoMAPMax-configPage9.egoMAPMin)/2U))*2U;
   
   currentStatus.afrTarget = currentStatus.O2;
-  currentStatus.egoCorrection = 100U;
+  // Signed about zero: 0 == no trim at all (this used to be 100 on an unsigned byte).
+  currentStatus.egoCorrection = 0;
   
   currentStatus.isDFCOActive = false;
 
@@ -371,76 +382,76 @@ static void test_corrections_closedloop_off_nosensor(void) {
   setup_ego_simple();
   currentStatus.O2 = currentStatus.afrTarget + 1U;
   configPage6.egoType = EGO_TYPE_OFF;
-  TEST_ASSERT_EQUAL(100U, correctionAFRClosedLoop());
+  TEST_ASSERT_EQUAL(0, correctionAFRClosedLoop());
 }
 
 static void test_corrections_closedloop_off_dfco(void) {
   setup_ego_simple();
   currentStatus.O2 = currentStatus.afrTarget + 1U;
   currentStatus.isDFCOActive =  true;
-  TEST_ASSERT_EQUAL(100U, correctionAFRClosedLoop());
+  TEST_ASSERT_EQUAL(0, correctionAFRClosedLoop());
 }
 
 static void test_corrections_closedloop_off_no_algorithm(void) {
   setup_ego_simple();
   currentStatus.O2 = currentStatus.afrTarget + 1U;
   configPage6.egoAlgorithm = EGO_ALGORITHM_NONE;
-  TEST_ASSERT_EQUAL(100U, correctionAFRClosedLoop());
+  TEST_ASSERT_EQUAL(0, correctionAFRClosedLoop());
 
   setup_ego_simple();
   currentStatus.O2 = currentStatus.afrTarget + 1U;
   configPage6.egoAlgorithm = EGO_ALGORITHM_INVALID1;
-  TEST_ASSERT_EQUAL(100U, correctionAFRClosedLoop());
+  TEST_ASSERT_EQUAL(0, correctionAFRClosedLoop());
 }
 
 static void test_corrections_closedloop_off_invalidconditions_coolant(void) {
   setup_ego_simple();
   currentStatus.O2 = currentStatus.afrTarget + 1U;
   currentStatus.coolant = temperatureRemoveOffset(configPage6.egoTemp) - 1; 
-  TEST_ASSERT_EQUAL(100U, correctionAFRClosedLoop());
+  TEST_ASSERT_EQUAL(0, correctionAFRClosedLoop());
 }
 
 static void test_corrections_closedloop_off_invalidconditions_rpm(void) {
   setup_ego_simple();
   currentStatus.O2 = currentStatus.afrTarget + 1U;
   currentStatus.setRpm( (configPage6.egoRPM*100U) - 1U);
-  TEST_ASSERT_EQUAL(100U, correctionAFRClosedLoop());
+  TEST_ASSERT_EQUAL(0, correctionAFRClosedLoop());
 }
 
 static void test_corrections_closedloop_off_invalidconditions_tps(void) {
   setup_ego_simple();
   currentStatus.O2 = currentStatus.afrTarget + 1U;
   currentStatus.TPS = configPage6.egoTPSMax + 1U;
-  TEST_ASSERT_EQUAL(100U, correctionAFRClosedLoop());
+  TEST_ASSERT_EQUAL(0, correctionAFRClosedLoop());
 }
 
 static void test_corrections_closedloop_off_invalidconditions_o2(void) {
   setup_ego_simple();
   currentStatus.O2 = configPage6.ego_min - 1U;
-  TEST_ASSERT_EQUAL(100U, correctionAFRClosedLoop());
+  TEST_ASSERT_EQUAL(0, correctionAFRClosedLoop());
 
   setup_ego_simple();
   currentStatus.O2 = configPage6.ego_max + 1U;
-  TEST_ASSERT_EQUAL(100U, correctionAFRClosedLoop());
+  TEST_ASSERT_EQUAL(0, correctionAFRClosedLoop());
 }
 
 static void test_corrections_closedloop_off_invalidconditions_map(void) {
   setup_ego_simple();
   currentStatus.O2 = currentStatus.afrTarget + 1U;
   currentStatus.MAP = (configPage9.egoMAPMin*2U) - 1U;
-  TEST_ASSERT_EQUAL(100U, correctionAFRClosedLoop());
+  TEST_ASSERT_EQUAL(0, correctionAFRClosedLoop());
 
   setup_ego_simple();
   currentStatus.O2 = currentStatus.afrTarget + 1U;
   currentStatus.MAP = (configPage9.egoMAPMax*2U) + 1U;
-  TEST_ASSERT_EQUAL(100U, correctionAFRClosedLoop());
+  TEST_ASSERT_EQUAL(0, correctionAFRClosedLoop());
 }
 
 //Test calling correctionAFRClosedLoop() before the required number of ignition cycles have taken place
 static void test_corrections_closedloop_outsidecycle(void) {
   setup_ego_simple();
   currentStatus.O2 = currentStatus.afrTarget + 1U;
-  currentStatus.egoCorrection = 123U;
+  currentStatus.egoCorrection = 23;
   ignitionCount = AFRnextCycle - (configPage6.egoCount/2U); 
   TEST_ASSERT_EQUAL(currentStatus.egoCorrection, correctionAFRClosedLoop());
 }
@@ -450,7 +461,7 @@ static void test_corrections_closedloop_outsidecycle(void) {
 static void test_corrections_closedloop_cycle_countrollover(void) {
   setup_ego_simple();
   currentStatus.O2 = currentStatus.afrTarget + 1U;
-  currentStatus.egoCorrection = 101U;
+  currentStatus.egoCorrection = 1;
   ignitionCount = UINT16_MAX - (configPage6.egoCount/2); 
   AFRnextCycle = ignitionCount + configPage6.egoCount; //This will overflow AFRnextCycle
   TEST_ASSERT_EQUAL(currentStatus.egoCorrection, correctionAFRClosedLoop());
@@ -458,7 +469,7 @@ static void test_corrections_closedloop_cycle_countrollover(void) {
 
 static void test_corrections_closedloop_simple_nocorrection(void) {
   setup_ego_simple();
-  currentStatus.egoCorrection = 101U;
+  currentStatus.egoCorrection = 1;
   currentStatus.O2 = currentStatus.afrTarget;
   TEST_ASSERT_EQUAL(currentStatus.egoCorrection, correctionAFRClosedLoop());
 }
@@ -466,51 +477,66 @@ static void test_corrections_closedloop_simple_nocorrection(void) {
 static void test_corrections_closedloop_simple_lean(void) {
   setup_ego_simple();
   currentStatus.O2 = currentStatus.afrTarget + 1U;
-  TEST_ASSERT_EQUAL(currentStatus.egoCorrection+1U, correctionAFRClosedLoop());
+  // NOTE: capture the expectation BEFORE the call. correctionAFRClosedLoop() publishes this
+  // cycle's correction into currentStatus.egoCorrection (so the learner can read it), so
+  // reading that field afterwards is testing the output, not the input.
+  const int8_t expected = currentStatus.egoCorrection + 1;
+  TEST_ASSERT_EQUAL(expected, correctionAFRClosedLoop());
 }
 
+// Walking the simple controller to its lean authority limit must stop exactly at that limit
+// and must not wrap. The old unsigned form wrapped modulo 256 above egoLimit 155; it cannot
+// now, because the value is signed and the limit is computed from the authority tables.
 static void test_corrections_closedloop_simple_lean_maxcorrection(void) {
   setup_ego_simple();
 
   currentStatus.O2 = configPage6.ego_max-1U;
 
-  for (uint8_t index=0; index<configPage6.egoLimit; ++index) {
+  for (int index=0; index<configPage6.egoLimit; ++index) {
     setup_valid_ego_cycle();
-    currentStatus.egoCorrection = 100U + index;
-    TEST_ASSERT_EQUAL(currentStatus.egoCorrection+1U, correctionAFRClosedLoop());
+    currentStatus.egoCorrection = (int8_t)index;
+    const int8_t expected = currentStatus.egoCorrection + 1;
+    TEST_ASSERT_EQUAL(expected, correctionAFRClosedLoop());
   }
   setup_valid_ego_cycle();
-  TEST_ASSERT_EQUAL(100U+configPage6.egoLimit, correctionAFRClosedLoop());
+  TEST_ASSERT_EQUAL((int)configPage6.egoLimit, correctionAFRClosedLoop());
   setup_valid_ego_cycle();
-  TEST_ASSERT_EQUAL(100U+configPage6.egoLimit, correctionAFRClosedLoop());
+  TEST_ASSERT_EQUAL((int)configPage6.egoLimit, correctionAFRClosedLoop());
   setup_valid_ego_cycle();
-  TEST_ASSERT_EQUAL(100U+configPage6.egoLimit, correctionAFRClosedLoop());  
+  TEST_ASSERT_EQUAL((int)configPage6.egoLimit, correctionAFRClosedLoop());
 }
 
 static void test_corrections_closedloop_simple_rich(void) {
   setup_ego_simple();
   currentStatus.O2 = currentStatus.afrTarget - 1U;
-  TEST_ASSERT_EQUAL(currentStatus.egoCorrection-1U, correctionAFRClosedLoop());
+  const int8_t expected = currentStatus.egoCorrection - 1;
+  TEST_ASSERT_EQUAL(expected, correctionAFRClosedLoop());
 }
 
+// Walk the simple controller down to its rich (remove-fuel) authority limit.
+//
+// The input is set one step *ahead* of where we want the output to land, because
+// correctionAFRClosedLoop() applies the authority clamp itself: feeding it a value that is
+// already at the limit would be pre-clamping the input and testing nothing.
 static void test_rich_max_correction(void) {
   currentStatus.O2 = configPage6.ego_min+1U;
 
-  uint8_t correction = 100U; 
-  uint8_t counter = 0;
-  while (correction>(100U-configPage6.egoLimit)) {
+  int8_t correction = 0;
+  for (int index = 1; index <= (int)configPage6.egoLimit; ++index) {
     setup_valid_ego_cycle();
-    currentStatus.egoCorrection = 100U - counter;
+    // Start at -1 and step toward the limit, so the first call still has room to move.
+    currentStatus.egoCorrection = (int8_t)(-index + 1);
     correction = correctionAFRClosedLoop();
-    TEST_ASSERT_LESS_THAN(100U, correction);
-    ++counter;
+    TEST_ASSERT_LESS_THAN(0, correction);
   }
+
+  // At the limit, and it must stay there rather than wrapping.
   setup_valid_ego_cycle();
-  TEST_ASSERT_EQUAL(100U-configPage6.egoLimit, correctionAFRClosedLoop());
+  TEST_ASSERT_EQUAL(-(int)configPage6.egoLimit, correctionAFRClosedLoop());
   setup_valid_ego_cycle();
-  TEST_ASSERT_EQUAL(100U-configPage6.egoLimit, correctionAFRClosedLoop());
+  TEST_ASSERT_EQUAL(-(int)configPage6.egoLimit, correctionAFRClosedLoop());
   setup_valid_ego_cycle();
-  TEST_ASSERT_EQUAL(100U-configPage6.egoLimit, correctionAFRClosedLoop());  
+  TEST_ASSERT_EQUAL(-(int)configPage6.egoLimit, correctionAFRClosedLoop());
 }
 
 static void test_corrections_closedloop_simple_rich_maxcorrection(void) {
@@ -533,7 +559,7 @@ static void setup_ego_pid(void) {
 }
 
 // PID is time based and may need multiple cycles to move
-static uint8_t run_pid(uint8_t cycles, uint8_t delayMillis) {
+static int8_t run_pid(uint8_t cycles, uint8_t delayMillis) {
   for (uint8_t index=0; index<cycles-1U; ++index) {
     setup_valid_ego_cycle();
     // Serial.print(currentStatus.O2); Serial.print(" ");
@@ -549,14 +575,14 @@ static uint8_t run_pid(uint8_t cycles, uint8_t delayMillis) {
 static void test_corrections_closedloop_pid_nocorrection(void) {
   setup_ego_pid();
   currentStatus.O2 = currentStatus.afrTarget;
-  TEST_ASSERT_EQUAL(100U, run_pid(10, 10));
+  TEST_ASSERT_EQUAL(0, run_pid(10, 10));
 }
 
 static void test_corrections_closedloop_pid_lean(void) {
   setup_ego_pid();
   currentStatus.O2 = configPage6.ego_max-1U;
 
-  TEST_ASSERT_GREATER_THAN(100U, run_pid(10, 10));
+  TEST_ASSERT_GREATER_THAN(0, run_pid(10, 10));
 }
 
 static void test_corrections_closedloop_pid_lean_maxcorrection(void) {
@@ -564,20 +590,20 @@ static void test_corrections_closedloop_pid_lean_maxcorrection(void) {
 
   currentStatus.O2 = configPage6.ego_max-1U;
 
-  TEST_ASSERT_EQUAL(100U+configPage6.egoLimit, run_pid(40, 10));
+  TEST_ASSERT_EQUAL((int)configPage6.egoLimit, run_pid(40, 10));
   setup_valid_ego_cycle();
-  TEST_ASSERT_EQUAL(100U+configPage6.egoLimit, correctionAFRClosedLoop());
+  TEST_ASSERT_EQUAL((int)configPage6.egoLimit, correctionAFRClosedLoop());
   setup_valid_ego_cycle();
-  TEST_ASSERT_EQUAL(100U+configPage6.egoLimit, correctionAFRClosedLoop());
+  TEST_ASSERT_EQUAL((int)configPage6.egoLimit, correctionAFRClosedLoop());
   setup_valid_ego_cycle();
-  TEST_ASSERT_EQUAL(100U+configPage6.egoLimit, correctionAFRClosedLoop());
+  TEST_ASSERT_EQUAL((int)configPage6.egoLimit, correctionAFRClosedLoop());
 }
 
 
 static void test_corrections_closedloop_pid_rich(void) {
   setup_ego_pid();
   currentStatus.O2 = configPage6.ego_min+1U;
-  TEST_ASSERT_LESS_THAN(100U, run_pid(10, 10));
+  TEST_ASSERT_LESS_THAN(0, run_pid(10, 10));
 }
 
 static void test_corrections_closedloop_pid_rich_maxcorrection(void) {
@@ -585,13 +611,13 @@ static void test_corrections_closedloop_pid_rich_maxcorrection(void) {
 
   currentStatus.O2 = configPage6.ego_min+1U;
 
-  TEST_ASSERT_EQUAL(100U-configPage6.egoLimit, run_pid(40, 10));
+  TEST_ASSERT_EQUAL(-(int)configPage6.egoLimit, run_pid(40, 10));
   setup_valid_ego_cycle();
-  TEST_ASSERT_EQUAL(100U-configPage6.egoLimit, correctionAFRClosedLoop());
+  TEST_ASSERT_EQUAL(-(int)configPage6.egoLimit, correctionAFRClosedLoop());
   setup_valid_ego_cycle();
-  TEST_ASSERT_EQUAL(100U-configPage6.egoLimit, correctionAFRClosedLoop());
+  TEST_ASSERT_EQUAL(-(int)configPage6.egoLimit, correctionAFRClosedLoop());
   setup_valid_ego_cycle();
-  TEST_ASSERT_EQUAL(100U-configPage6.egoLimit, correctionAFRClosedLoop());
+  TEST_ASSERT_EQUAL(-(int)configPage6.egoLimit, correctionAFRClosedLoop());
 }
 
 static void test_corrections_closedloop(void)
@@ -1654,7 +1680,8 @@ static void test_corrections_correctionsFuel_ae_modes(void) {
   TEST_ASSERT_EQUAL_MESSAGE(100, correctionASE(), "correctionASE");
   TEST_ASSERT_EQUAL_MESSAGE(100, correctionCranking(), "correctionCranking");
   TEST_ASSERT_EQUAL_MESSAGE(100, correctionFloodClear(), "correctionFloodClear");
-  TEST_ASSERT_EQUAL_MESSAGE(100, correctionAFRClosedLoop(), "correctionAFRClosedLoop");
+  // Signed about zero: 0 == no trim. This used to assert 100 on the unsigned scale.
+  TEST_ASSERT_EQUAL_MESSAGE(0, correctionAFRClosedLoop(), "correctionAFRClosedLoop");
   TEST_ASSERT_EQUAL_MESSAGE(100, correctionBatVoltage(), "correctionBatVoltage");
   TEST_ASSERT_EQUAL_MESSAGE(100, correctionIATDensity(), "correctionIATDensity");
   TEST_ASSERT_EQUAL_MESSAGE(100, correctionBaro(), "correctionBaro");
@@ -1737,7 +1764,8 @@ static void test_corrections_correctionsFuel_clip_limit(void) {
   TEST_ASSERT_EQUAL_MESSAGE(100, correctionCranking(), "correctionCranking");
   TEST_ASSERT_EQUAL_MESSAGE(100, correctionAccel(), "correctionAccel");
   TEST_ASSERT_EQUAL_MESSAGE(100, correctionFloodClear(), "correctionFloodClear");
-  TEST_ASSERT_EQUAL_MESSAGE(100, correctionAFRClosedLoop(), "correctionAFRClosedLoop");
+  // Signed about zero: 0 == no trim. This used to assert 100 on the unsigned scale.
+  TEST_ASSERT_EQUAL_MESSAGE(0, correctionAFRClosedLoop(), "correctionAFRClosedLoop");
   TEST_ASSERT_EQUAL_MESSAGE(255, correctionBatVoltage(), "correctionBatVoltage");
   TEST_ASSERT_EQUAL_MESSAGE(255, correctionIATDensity(), "correctionIATDensity");
   TEST_ASSERT_EQUAL_MESSAGE(255, correctionBaro(), "correctionBaro");

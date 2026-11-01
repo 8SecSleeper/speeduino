@@ -4,6 +4,7 @@
 #include "globals.h"
 #include "init.h"
 #include "storage.h"
+#include "ltt.h"
 #include "updates.h"
 #include "timers.h"
 #include "comms.h"
@@ -144,6 +145,13 @@ void initialiseAll(void)
     doUpdates(); //Check if any data items need updating (Occurs with firmware updates)
 #if defined(CORE_TEENSY) && defined(USE_SPI_EEPROM)
     boardBootTrace(0x34); // updates done
+#endif
+    // Load the long-term trim block. Deliberately after doUpdates() and not via
+    // loadAllPages(): it lives above 0x1000, carries its own header, and must be able to
+    // refuse to load on a storage backend too small to hold it.
+    lttInit();
+#if defined(CORE_TEENSY) && defined(USE_SPI_EEPROM)
+    boardBootTrace(0x37); // long-term trims loaded
 #endif
 #endif
 

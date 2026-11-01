@@ -4,6 +4,7 @@
 #include "preprocessor.h"
 #include "table3d_visitor.h"
 #include "prog_mem_support.h"
+#include "ltt.h"
 
 // This minimizes RAM usage at no performance cost
 #pragma GCC optimize ("Os") 
@@ -360,6 +361,12 @@ static page_map_t getPageMap(uint8_t pageNumber)
     makeEntity(&boostTableLookupDuty),
     makeEntity(&configPage15, sizeof(configPage15)),
   };
+  // Page 16: the long-term trim block. A single raw entity - the whole payload is packed,
+  // little-endian and contiguous precisely so that TunerStudio page offsets map linearly
+  // onto it. See ltt.h.
+  static constexpr entity_t lttPageMap[] PROGMEM = {
+    makeEntity(&lttData, sizeof(lttBlock)),
+  };
 
   static constexpr page_map_t pageMaps[MAX_PAGE_NUM] PROGMEM = {
     { pageZeroMap, _countof(pageZeroMap) },
@@ -378,6 +385,7 @@ static page_map_t getPageMap(uint8_t pageNumber)
     { progOutsPageMap, _countof(progOutsPageMap) },    
     { ign2PageMap, _countof(ign2PageMap) },
     { boostVvt2PageMap, _countof(boostVvt2PageMap) },
+    { lttPageMap, _countof(lttPageMap) },
   };
 
   if (pageNumber>=MAX_PAGE_NUM)
@@ -461,6 +469,12 @@ void __attribute__((noinline)) setTuneToEmpty(void) {
       iter = advance(iter);
     }
   }
+
+  // The trim block must not simply be zeroed. Zero trims are correct (nothing learned yet),
+  // but zero AUTHORITY would silently disable closed loop on a board being set up for the
+  // first time - the user would see no EGO correction at all and no obvious reason why.
+  // Give it its real defaults instead.
+  lttRestoreDefaults();
 }
 
 uint16_t getPageSize(byte pageNum)

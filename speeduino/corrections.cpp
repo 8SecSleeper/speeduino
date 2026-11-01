@@ -28,6 +28,7 @@ There are 2 top level functions that call more detailed corrections for Fuel and
 #include "elapsed_time.h"
 #include "timers.h"
 #include "maths.h"
+#include "ltt.h"
 #include "sensors.h"
 #include "unit_testing.h"
 #include "preprocessor.h"
@@ -72,9 +73,19 @@ static constexpr uint8_t NO_FUEL_CORRECTION = ONE_HUNDRED_PCT;
 // Constant that represents the baseline fuel correction to be modified
 // (yes, it's the same as NO_FUEL_CORRECTION, but captures a slightly different concept)
 static constexpr uint8_t BASELINE_FUEL_CORRECTION = ONE_HUNDRED_PCT;
+// Short-term trim (egoCorrection) is signed about zero: 0 == no trim at all.
+static constexpr int8_t NO_EGO_TRIM = 0;
 
-static void setEgoPidTunings(const config6 &page6) {
-  egoPID.setOutputLimits(-page6.egoLimit, page6.egoLimit); 
+static inline void setEgoPidTunings(const config6 &page6) {
+  // The PID output limits are fixed at the full signed range, NOT at +/-egoLimit.
+  //
+  // The authority bound is applied once, in correctionAFRClosedLoop(), from the per-cell
+  // authority table. Limiting the controller here as well would bound the integral term at
+  // egoLimit, so the PID could never reach a per-cell authority wider than egoLimit - the
+  // authority table would be silently capped by an unrelated setting. It also means changing
+  // egoLimit at runtime would wind the integral against a limit rather than against the
+  // mixture. One bound, applied once, at the end.
+  egoPID.setOutputLimits(INT8_MIN, INT8_MAX);
   egoPID.setTunings(PidTuningParameters(page6.egoKP, page6.egoKI, page6.egoKD) * -1); 
 }
 
@@ -87,7 +98,7 @@ void initialiseCorrections(void)
 
   currentStatus.flexIgnCorrection = 0;
   //Default value of no adjustment must be set to avoid randomness on first correction cycle after startup
-  currentStatus.egoCorrection = NO_FUEL_CORRECTION; 
+  currentStatus.egoCorrection = NO_EGO_TRIM;
   currentStatus.ASEValue = NO_FUEL_CORRECTION;
   currentStatus.wueCorrection = NO_FUEL_CORRECTION;
   currentStatus.iatCorrection = NO_FUEL_CORRECTION;
@@ -685,40 +696,69 @@ uint8_t calculateAfrTarget(table3d16RpmLoad &afrLookUpTable, const statuses &cur
   return current.afrTarget;
 }
 
-static inline uint8_t computeSimpleLeanCorrection(const statuses &current, const config6 &page6) {
-  if(current.egoCorrection < (BASELINE_FUEL_CORRECTION + page6.egoLimit) ) //Fuelling adjustment must be at most the egoLimit amount (up or down)
+/** @brief Per-cell, asymmetric authority for the current operating point.
+ *
+ * The whole point of a per-cell pair rather than one scalar: "how much fuel may I add here"
+ * and "how much fuel may I remove here" have different answers and different consequences.
+ * Removing fuel at WOT under boost is how engines die; adding fuel is comparatively safe.
+ *
+ * Named after what they PERMIT rather than after the mixture they respond to, because the
+ * lean/rich naming is symmetric-looking and easy to swap. maxAddPct is positive (a positive
+ * trim adds fuel); maxRemovePct is negative (a negative trim removes fuel).
+ */
+struct egoAuthority {
+  int8_t maxRemovePct;  ///< Most negative trim permitted (<= 0). Bounds fuel REMOVAL.
+  int8_t maxAddPct;     ///< Most positive trim permitted (>= 0). Bounds fuel ADDITION.
+};
+
+/* Naming note, because this is where it is easiest to introduce a sign error.
+ *
+ * "Lean correction" means the engine is running LEAN, so the controller ADDS fuel: the trim
+ * moves in the POSITIVE direction. "Rich correction" means the engine is running RICH, so the
+ * controller REMOVES fuel: the trim moves NEGATIVE.
+ *
+ * The limits are therefore named after what they permit - ADD fuel / REMOVE fuel - not after
+ * the mixture they respond to. Naming them lean/rich is what caused the two to be swapped.
+ */
+static inline int8_t computeSimpleAddFuelCorrection(const statuses &current, int8_t maxAddPct) {
+  if(current.egoCorrection < maxAddPct ) //Fuelling adjustment must be at most the authority limit
   {
-    return current.egoCorrection+1U; //Increase the fuelling by 1%
+    return (int8_t)(current.egoCorrection + 1); //Increase the fuelling by 1%
   }
   return current.egoCorrection; //Means we're at the maximum adjustment amount, so simply return that again
 }
 
-static inline uint8_t computeSimpleRichCorrection(const statuses &current, const config6 &page6) {
-  if(current.egoCorrection > (BASELINE_FUEL_CORRECTION - page6.egoLimit) ) //Fuelling adjustment must be at most the egoLimit amount (up or down)
+static inline int8_t computeSimpleRemoveFuelCorrection(const statuses &current, int8_t maxRemovePct) {
+  if(current.egoCorrection > maxRemovePct ) //Fuelling adjustment must be at most the authority limit
   {
-    return (current.egoCorrection - 1U); //Decrease the fuelling by 1%
+    return (int8_t)(current.egoCorrection - 1); //Decrease the fuelling by 1%
   }
-  return current.egoCorrection; //Means we're at the maximum adjustment amount, so simply return that again  
+  return current.egoCorrection; //Means we're at the maximum adjustment amount, so simply return that again
 }
 
-static inline uint8_t computeSimpleCorrection(const statuses &current, const config6 &page6) {
+static inline int8_t computeSimpleCorrection(const statuses &current, egoAuthority auth) {
   if(current.O2 > current.afrTarget) {
-    return computeSimpleLeanCorrection(current, page6);
+    // Running lean: add fuel, bounded by how much may be added.
+    return computeSimpleAddFuelCorrection(current, auth.maxAddPct);
   }
   if(current.O2 < current.afrTarget) {
-    return computeSimpleRichCorrection(current, page6);
+    // Running rich: remove fuel, bounded by how much may be removed.
+    return computeSimpleRemoveFuelCorrection(current, auth.maxRemovePct);
   }
   return current.egoCorrection; //Means we're already right on target
 }
 
-static inline uint8_t computePIDCorrection(const statuses &current, const config6 &page6) {
+static inline int8_t computePIDCorrection(const statuses &current, const config6 &page6) {
   //Set the PID values again, just in case the user has changed them since the last loop
   setEgoPidTunings(page6);
   egoPID.setSetPoint(current.afrTarget);
 
-  // Can't do this in one step: MISRA compliance.
-  int8_t correction = (int8_t)BASELINE_FUEL_CORRECTION + (int8_t)egoPID.compute(current.O2);
-  return (uint8_t)correction;
+  // The PID computes in int32_t internally (see PID.h) and is limited to +/-egoLimit by
+  // setEgoPidTunings(), so this cannot exceed +/-100. Clamp before narrowing anyway: the
+  // authority limit is applied by the caller, and a silent int8_t wrap here would invert
+  // the direction of the correction.
+  const int32_t pidOutput = egoPID.compute(current.O2);
+  return (int8_t)clamp(pidOutput, (int32_t)INT8_MIN, (int32_t)INT8_MAX);
 }
 
 static inline bool nextAfrCycleHasStarted(void) {
@@ -745,6 +785,27 @@ static inline bool isAfrClosedLoopOperational(const statuses &current, const con
       ;
 }
 
+/** @brief Resolve the authority limits for the current operating point.
+ *
+ * Uses the per-cell long-term-trim authority table. `configPage6.egoLimit` still exists and
+ * still bounds the *short-term* loop, because a transient +/-X% of wiggle is a separate
+ * concern from how much the mixture may be permanently re-mapped - but it can never widen
+ * the per-cell limits, only tighten them.
+ */
+static inline egoAuthority getEgoAuthority(const statuses &current) {
+  uint8_t leanRemovalPct = 0U;
+  uint8_t richAdditionPct = 0U;
+  const uint8_t table = lttActiveTableIndex(configPage10, current);
+  lttGetAuthority(table, fuelTable, current.fuelLoad, current.RPM, leanRemovalPct, richAdditionPct);
+
+  // egoLimit caps the short-term authority on top of the per-cell table.
+  const uint8_t stftLimit = configPage6.egoLimit;
+  if (leanRemovalPct > stftLimit)  { leanRemovalPct = stftLimit; }
+  if (richAdditionPct > stftLimit) { richAdditionPct = stftLimit; }
+
+  return { (int8_t)(-(int8_t)leanRemovalPct), (int8_t)richAdditionPct };
+}
+
 static inline bool isValidEgoAlgorithm(const config6 &page6) {
   return (page6.egoAlgorithm != EGO_ALGORITHM_INVALID1)
       && (page6.egoAlgorithm != EGO_ALGORITHM_NONE);
@@ -757,11 +818,12 @@ static inline bool isAfrCorrectionEnabled(const statuses &current, const config6
       && isValidEgoAlgorithm(page6);
 }
 
-static inline uint8_t computeAFRCorrection(const statuses &current, const config6 &page6) {
-  uint8_t correction = NO_FUEL_CORRECTION;
+static inline int8_t computeAFRCorrection(const statuses &current, const config6 &page6) {
+  int8_t correction = NO_EGO_TRIM;
 
   if (page6.egoAlgorithm == EGO_ALGORITHM_SIMPLE) {
-    correction = computeSimpleCorrection(current, page6);
+    const egoAuthority auth = getEgoAuthority(current);
+    correction = computeSimpleCorrection(current, auth);
   } else if(page6.egoAlgorithm == EGO_ALGORITHM_PID) {
     correction = computePIDCorrection(current, page6);
   } else {
@@ -784,13 +846,18 @@ This continues until either:
 PID (Best suited to wideband sensors):
 
 */
-TESTABLE_INLINE_STATIC uint8_t correctionAFRClosedLoop(void)
+TESTABLE_INLINE_STATIC int8_t correctionAFRClosedLoop(void)
 {
-  uint8_t correction = NO_FUEL_CORRECTION;
+  int8_t correction = NO_EGO_TRIM;
+  // Set when this call actually produced a fresh correction, i.e. an EGO cycle boundary was
+  // crossed. The learner must run at most once per cycle, and must see the value this call
+  // computed - not the previous one still sitting in currentStatus.
+  bool newCycle = false;
   
   if (isAfrCorrectionEnabled(currentStatus, configPage6)) {
     if (nextAfrCycleHasStarted()) {
       setNextAfrCycle();
+      newCycle = true;
         
       //Check all other requirements for closed loop adjustments
       if (isAfrClosedLoopOperational(currentStatus, configPage6, configPage9)) {
@@ -802,10 +869,29 @@ TESTABLE_INLINE_STATIC uint8_t correctionAFRClosedLoop(void)
     }
   } //egoType
 
-  // Final check to ensure within authority range (This can be needed if the user has lowered the authority limit)
-  return clamp( correction, 
-                (uint8_t)(BASELINE_FUEL_CORRECTION - configPage6.egoLimit), 
-                (uint8_t)(BASELINE_FUEL_CORRECTION + configPage6.egoLimit));
+  // Final check to ensure within authority range (This can be needed if the user has lowered the authority limit).
+  //
+  // Note what this is NOT: an unsigned "100 +/- egoLimit" bound. That form wrapped modulo 256
+  // for any limit above 155 and made 16% a hard ceiling, which is why full-authority closed
+  // loop was unreachable. Signed-about-zero arithmetic cannot wrap, and the limits come from
+  // the per-cell authority table so they can differ between adding and removing fuel.
+  const egoAuthority auth = getEgoAuthority(currentStatus);
+  const int8_t clamped = (int8_t)clamp(correction, auth.maxRemovePct, auth.maxAddPct);
+
+  if (newCycle) {
+    // Publish this cycle's value first, then learn from it. The learner reads the status
+    // field, so publishing before calling it is what makes it integrate the correction that
+    // was actually applied - and because this is the *clamped* value, learning stops when a
+    // cell is pinned at its limit instead of winding up against a value that is not being
+    // delivered.
+    currentStatus.egoCorrection = clamped;
+
+    // The learn table is updated on the EGO cycle, not every loop, so its update rate is
+    // tied to how often the closed-loop controller actually produces a new correction.
+    lttLearn();
+  }
+
+  return clamped;
 }
 
 
@@ -840,7 +926,10 @@ uint16_t correctionsFuel(void)
   sumCorrections = combineCorrections(sumCorrections, correctionFloodClear());
 
   currentStatus.egoCorrection = correctionAFRClosedLoop();
-  sumCorrections = combineCorrections(sumCorrections, currentStatus.egoCorrection);
+  // egoCorrection is signed about zero, but combineCorrections() works in the 100 == "no
+  // change" scale used by every other correction. Convert at the boundary and floor at 0 so
+  // a -100 trim means "no fuel" rather than wrapping to a huge positive multiplier.
+  sumCorrections = combineCorrections(sumCorrections, (uint16_t)(100 + (int16_t)currentStatus.egoCorrection));
 
   //Voltage correction is applied to the injector opening time
   currentStatus.batCorrection = correctionBatVoltage();
@@ -863,8 +952,12 @@ uint16_t correctionsFuel(void)
   currentStatus.isDFCOActive = correctionDFCO();
   sumCorrections = combineCorrections(sumCorrections, correctionDFCOfuel());
 
-  //This is the maximum allowable increase
-  return (std::min)((uint16_t)1500U, (uint16_t)sumCorrections);
+  // This is the maximum allowable increase, and - now that a trim can remove fuel rather than
+  // being one of several additive enrichments - a minimum. Without a floor, a lean-side trim
+  // of 100% could multiply fuelling by ~0 and stop the engine. The floor is independent of the
+  // authority tables so that a mis-set table is survivable rather than fatal.
+  const uint16_t floor = lttFuelMultiplierFloorPct();
+  return (uint16_t)clamp((uint32_t)sumCorrections, (uint32_t)floor, (uint32_t)1500U);
 }
 
 //******************************** IGNITION ADVANCE CORRECTIONS ********************************

@@ -1,5 +1,6 @@
 #include "globals.h"
 #include "logger.h"
+#include "corrections.h"
 #include "decoders.h"
 #include "init.h"
 #include "maths.h"
@@ -206,7 +207,7 @@ byte getTSLogEntry(uint16_t byteNum)
     case 8: statusValue = currentStatus.batCorrection; break; //Battery voltage correction (%)
     case 9: statusValue = currentStatus.battery10; break; //battery voltage
     case 10: statusValue = currentStatus.O2; break; //O2
-    case 11: statusValue = currentStatus.egoCorrection; break; //Exhaust gas correction (%)
+    case 11: statusValue = buildEgoCorrectionChannel(currentStatus); break; //Exhaust gas correction (%), offset to the 100 == no-change scale
     case 12: statusValue = currentStatus.iatCorrection; break; //Air temperature Correction (%)
     case 13: statusValue = currentStatus.wueCorrection; break; //Warmup enrichment (%)
     case 14: statusValue = lowByte(currentStatus.RPM); break; //rpm HB
@@ -398,7 +399,7 @@ int16_t getReadableLogEntry(uint16_t logIndex)
     case 7: statusValue = currentStatus.batCorrection; break; //Battery voltage correction (%)
     case 8: statusValue = currentStatus.battery10; break; //battery voltage
     case 9: statusValue = currentStatus.O2; break; //O2
-    case 10: statusValue = currentStatus.egoCorrection; break; //Exhaust gas correction (%)
+    case 10: statusValue = buildEgoCorrectionChannel(currentStatus); break; //Exhaust gas correction (%), offset to the 100 == no-change scale
     case 11: statusValue = currentStatus.iatCorrection; break; //Air temperature Correction (%)
     case 12: statusValue = currentStatus.wueCorrection; break; //Warmup enrichment (%)
     case 13: statusValue = currentStatus.RPM; break; //rpm HB
@@ -576,7 +577,7 @@ uint8_t getLegacySecondarySerialLogEntry(uint16_t byteNum)
     case 8: statusValue = currentStatus.batCorrection; break; //Battery voltage correction (%)
     case 9: statusValue = currentStatus.battery10; break; //battery voltage
     case 10: statusValue = currentStatus.O2; break; //O2
-    case 11: statusValue = currentStatus.egoCorrection; break; //Exhaust gas correction (%)
+    case 11: statusValue = buildEgoCorrectionChannel(currentStatus); break; //Exhaust gas correction (%), offset to the 100 == no-change scale
     case 12: statusValue = currentStatus.iatCorrection; break; //Air temperature Correction (%)
     case 13: statusValue = currentStatus.wueCorrection; break; //Warmup enrichment (%)
     case 14: statusValue = lowByte(currentStatus.RPM); break; //rpm HB

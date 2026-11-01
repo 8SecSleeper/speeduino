@@ -28,6 +28,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #include "comms_secondary.h"
 #include "maths.h"
 #include "corrections.h"
+#include "ltt.h"
 #include "timers.h"
 #include "decoders.h"
 #include "src/controllers/idle/idle.h"
@@ -315,6 +316,17 @@ BEGIN_LTO_ALWAYS_INLINE(void) loop(void)
     {
       // Air conditioning control
       airConControl(currentStatus, configPage15);
+
+      // Advance the long-term trim slew. The stored trim is the learner's target; this is
+      // what actually reaches the injector, rate-limited so a trim change can never appear as
+      // a step change in pulse width. 10Hz is fast enough that the slew limit - not the update
+      // rate - is what bounds trim movement.
+      lttUpdateSlew(100U);
+
+      // Persist the trims once the engine has stopped and something has changed. Gated on
+      // RPM==0 inside lttSaveIfRequired(), and on the dirty flag so a key-off that learned
+      // nothing costs no flash wear at all.
+      lttSaveIfRequired();
 
       #if defined(NATIVE_CAN_AVAILABLE)
       sendCANBroadcast(10);

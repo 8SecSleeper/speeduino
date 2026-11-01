@@ -63,8 +63,22 @@ SEPARATOR = "std_separator"
 # Anything else changing this digest means a real offset may have moved, which
 # silently invalidates existing .msq files. Update this constant only after
 # deliberately confirming that.
-EXPECTED_CONSTANTS_DIGEST = "3e882d49d285e620"
+EXPECTED_CONSTANTS_DIGEST = "804fb7f8e41c3bdf"
 
+# Why this changed (from b9c364fd6c4aede3):
+#   egoLimit's INI maximum went 16 -> 100. This is a RANGE change only - the field stays a
+#   U08 at offset 7 on page 6, so no offset moved and no saved .msq is invalidated. It is
+#   required because egoLimit is now the short-term (STFT) bound and the per-cell authority
+#   can legitimately be wider than 16%; leaving the max at 16 would silently cap every
+#   per-cell authority at 16% in the tuning software.
+# Why this changed (from 2b8fcd041fae7f32):
+#   Added page 16 - the long-term fuel trim block (see speeduino/ltt.h). This APPENDS a new
+#   page after page 15; no existing constant moved and no existing offset changed, so no
+#   saved .msq loses meaning. New page 16 constants: lttMode, lttLearnRateDiv,
+#   lttLearnDeadband, lttLearnMinRPM, lttSaveRPM, lttLearnMinSamples, lttLearnMaxStep,
+#   lttSlewRate, lttTrim1, lttTrim2, lttLeanAuth1, lttLeanAuth2, lttRichAuth1, lttRichAuth2.
+#   Page 16's pageSize (2064) and the firmware's offsetof() assertions in ltt.h are the
+#   contract between this section and the C++ struct - they fail the build if they drift.
 # Why this changed (from cfb0d92d5e1553bf):
 #   onboard_log_file_rate's 4th enum label went "30Hz" -> "100Hz" (the SD logger's
 #   highest rate now replaces the old 30 Hz slot rather than adding a 5th option, so the
@@ -84,6 +98,18 @@ EXPECTED_CONSTANTS_DIGEST = "3e882d49d285e620"
 #   REMOVED Unused15_106_255
 #   MOVED / RESIZED: none
 # The bytes used were already reserved-and-unused, so no .msq offset is affected.
+
+# Changed again 3e882d49d285e620 -> 2b8fcd041fae7f32 (issue #1506, wideband AFR reference):
+#   RENAMED unused10_184 -> wbo2AfrRef, same offset 184, same U08/count-1 width. Nothing after
+#   it moves, and every field keeps the byte position it had.
+# Verified by parsing every [Constants] field's name+definition out of both revisions and
+# diffing: exactly one field differs (the rename), and ZERO common fields changed value.
+# i.e. no offset moved, no width changed - the reserved byte was simply given a meaning, so
+# an existing .msq still maps every field to the same location.
+#
+# Note this is a *silent* hazard for stored tunes: an old .msq carries whatever junk happened
+# to be in that reserved byte. The firmware migration (upgradeV27toV28 in updates.cpp) forces
+# the default, so a stale byte can never be interpreted as a real reference.
 
 # Sections that can define referenceable objects.
 SECTION_USERDEF = "userdefined"

@@ -72,6 +72,39 @@ extern table3d_value_t interpolate_3d_value(const xy_pair_t &lookUpValues,
                     const table3d_bin_t &yBin,
                     const uint16_t yMultiplier);
 
+/** @brief Interpolate a *signed 16-bit* table value from axis bins & values.
+ *
+ * The long-term trim tables store signed percent at 0.1% resolution, which does not
+ * fit @ref table3d_value_t. Rather than widen every table in the firmware (which would
+ * double the RAM of the VE, spark and AFR tables and rework the entire byte-oriented
+ * TunerStudio page layer), the identical bilinear maths is exposed for a second value
+ * type. Both paths share one implementation, so the geometry and the bin weighting
+ * cannot drift apart - see interpolate_3d_value_impl().
+ *
+ * The caller supplies bins found with @ref _table2d_detail::findCachedBin against the
+ * axis this table borrows. Because the trim tables share the VE table's axes, the caller
+ * passes the VE table's bins and the trim lands on exactly the same cell boundaries.
+ *
+ * Rounding is symmetric about zero (half away from zero) so that a trim of exactly 0
+ * reproduces 0 bit-for-bit, and a perfectly interpolated cell reproduces its stored value.
+ *
+ * @param lookUpValues The x & y axis values we are interpolating
+ * @param axisSize The length of an axis
+ * @param pValues The signed interpolation source values
+ * @param xBin The x-axis bin containing lookUpValues.x
+ * @param xMultiplier The x-axis multiplier
+ * @param yBin The y-axis bin containing lookUpValues.y
+ * @param yMultiplier The y-axis multiplier
+ * @return int16_t The interpolated signed value
+ */
+extern int16_t interpolate_3d_value_s16(const xy_pair_t &lookUpValues,
+                    const table3d_dim_t &axisSize,
+                    const int16_t *pValues,
+                    const table3d_bin_t &xBin,
+                    const uint16_t xMultiplier,
+                    const table3d_bin_t &yBin,
+                    const uint16_t yMultiplier);
+
 /// @endcond
 
 /** @brief Get a value from a 3D table using the specified lookup values.

@@ -14,6 +14,7 @@ void runAllFuelTests(void)
     extern void testCalculatePWLimit(void);
     extern void testCalcPrimaryPulseWidth(void);
     extern void testFuelPump(void);
+    extern void testLtt(void);
 
     testCorrections();
     testComputePulseWidths();
@@ -25,6 +26,7 @@ void runAllFuelTests(void)
     testCalculatePWLimit();
     testCalcPrimaryPulseWidth();
     testFuelPump();
+    testLtt();
 }
 
 TEST_HARNESS(runAllFuelTests)

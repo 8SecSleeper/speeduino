@@ -20,14 +20,20 @@ import sys
 
 from speeduino_client import ProtocolError, Speeduino
 
-# Config pages 1..15. Sizes from reference/speeduino.ini: pageSize= ...
+# Config pages 1..16. Sizes from reference/speeduino.ini: pageSize= ...
 PAGE_SIZES = {
     1: 128, 2: 288, 3: 288, 4: 128, 5: 288, 6: 128, 7: 240, 8: 384,
-    9: 192, 10: 192, 11: 288, 12: 192, 13: 128, 14: 288, 15: 256,
+    9: 192, 10: 192, 11: 288, 12: 192, 13: 128, 14: 288, 15: 256, 16: 2064,
 }
 
-# Sensor calibration tables (O2, IAT, CLT) at MAX_PAGE_NUM+1..+3, see pages.h.
-CALIBRATION_PAGES = {16: 96, 17: 96, 18: 96}
+# Sensor calibration pseudo-pages (O2, IAT, CLT), see pages.h. These are NOT config pages and
+# are NOT read over the p/M page protocol - the firmware maps anything >= MAX_PAGE_NUM to page
+# 0, which returns zero bytes. Calibration data travels via the 't' command instead. They are
+# listed here only so the docstring above stays honest about the numbering.
+#
+# They are derived from MAX_PAGE_NUM on the firmware side, so adding a config page shifts them.
+# With page 16 (long-term trims) added, MAX_PAGE_NUM is 17 and these became 18/19/20.
+CALIBRATION_PAGES = {18: 96, 19: 96, 20: 96}
 
 # Keep individual protocol payloads modest so a request stays well inside the firmware's
 # serial payload buffer.

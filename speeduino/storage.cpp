@@ -15,6 +15,7 @@ A full copy of the license may be found in the projects root directory
 #include "unit_testing.h"
 #include "scheduler.h"
 #include "storage_details.h"
+#include "ltt.h"
 
 using namespace storage::details;
 
@@ -206,6 +207,7 @@ TESTABLE_STATIC uint16_t getEntityStartAddress(page_iterator_t iter) {
     { &ignitionTable2, EEPROM_CONFIG14_MAP },
     { &boostTableLookupDuty, EEPROM_CONFIG15_MAP },
     { &configPage15, EEPROM_CONFIG15_START },
+    { &lttData, EEPROM_LTT_PAYLOAD },
   };
   static const constexpr entity_storage_map_t* entityMapEnd = entityMap + _countof(entityMap);
 
@@ -441,6 +443,21 @@ void savePage(uint8_t pageNum)
       writesRemaining = write_range((byte *)&configPage15, (byte *)&configPage15+sizeof(configPage15), EEPROM_CONFIG15_START, writesRemaining);
       break;
 
+    case lttPage:
+      /*---------------------------------------------------
+      | Long-term trim block - Page 16 (See ltt.h for layout)
+
+      | Written through lttSave() rather than directly, because the block carries a header
+      | that must be rewritten whenever the payload changes. Writing the header last means an
+      | interrupted burn leaves a CRC that does not match, and lttInit() then discards the
+      | block instead of loading half of it.
+      -----------------------------------------------------*/
+      if (lttSave())
+      {
+        writesRemaining = 0U;
+      }
+      break;
+
     default:
       break;
   }
@@ -566,6 +583,9 @@ void loadAllPages(void)
   (void)load_range(EEPROM_CONFIG15_START, (byte *)&configPage15, (byte *)&configPage15+sizeof(configPage15));  
 
   //*********************************************************************************************************************************************************************************
+  // The long-term trim block is NOT loaded here. It lives above 0x1000, carries its own
+  // magic/version/CRC header, and has to be able to refuse to load when the storage backend
+  // is too small to contain it. lttInit() owns that decision - see ltt.cpp.
 }
 
 void loadAllCalibrationTables(void)
