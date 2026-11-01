@@ -311,6 +311,38 @@ void lttMarkDirty(void);
 /** @brief Force a persist now, regardless of RPM. Used by an explicit TS burn. */
 bool lttSave(void);
 
+/**
+ * @brief Persist the block, honouring the storage write budget. Called from savePage().
+ *
+ * This is the *only* correct way for the page-save machinery to persist the block, because
+ * the burn loop depends on the budget being reported back accurately. `savePage()` clears the
+ * "burn pending" flag when the budget reaches zero, and `speeduino.ino()` re-enters
+ * `saveAllPages()` for as long as that flag stays cleared:
+ *
+ *     if (isEepromWritePending() && ...) { saveAllPages(); }
+ *
+ * So a page save that ignores the budget and always reports success makes the loop run
+ * forever - a flash-destroying bug that is invisible in a unit test that only checks the data
+ * round-trips.
+ *
+ * The budget applies to PAYLOAD bytes only. The header is always rewritten, because it is
+ * small, must always match the payload, and is written last so a torn save is detectable.
+ *
+ * @param writesRemaining Write budget for this pass.
+ * @return Writes still remaining. Zero means this page is finished.
+ */
+uint16_t lttSaveBlock(uint16_t writesRemaining);
+
+/**
+ * @brief True if the block differs from what is stored.
+ *
+ * Used by the burn path to skip writing entirely when nothing has changed. Without this, any
+ * full-tune burn would rewrite the whole 2 kB block even though the trims had not moved,
+ * which costs flash life for nothing. `update()` already skips unchanged bytes, but the cost
+ * we are avoiding here is the sector erase, not the byte writes.
+ */
+bool lttNeedsSave(void);
+
 /** @brief Read-only access to the page payload. */
 const lttBlock &lttGetPage(void);
 

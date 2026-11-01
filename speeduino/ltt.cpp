@@ -274,16 +274,100 @@ void lttInit(void)
 }
 
 /**
- * @brief Persist the payload plus a fresh header.
+ * @brief Does the payload in RAM differ from what is already stored?
  *
- * The payload is written first and the header last. That ordering is the whole crash-safety
- * design: if power is lost mid-save, the stored CRC will not match the stored payload, and
- * lttInit() then treats the block as corrupt and discards it. Losing one learn session is
- * recoverable; applying half of one is not.
+ * Used to skip writing when nothing has changed, so that an unrelated full-tune burn does not
+ * rewrite 2 kB of untouched trims. The stored CRC is checked first: if it does not match the
+ * RAM payload then the header's separate data version forces a rewrite anyway, and the
+ * per-byte loop would only be reporting what the CRC already told us.
  *
- * `updateObject()` writes only bytes that differ, and does not throttle, so a single call
- * completes the save. The block is 2,080 bytes of which typically only a few trims differ,
- * so a steady-state save is a handful of byte writes.
+ * @return true if any payload byte differs from storage.
+ */
+static bool payloadDiffersFromStorage(void)
+{
+  if (!lttStorageOk)
+  {
+    return false;
+  }
+
+  const storage_api_t &api = getStorageAPI();
+  const byte *p = (const byte *)&lttData;
+  const byte *pEnd = p + sizeof(lttData);
+
+  for (uint16_t address = EEPROM_LTT_PAYLOAD; p != pEnd; ++p, ++address)
+  {
+    if (api.read(address) != *p)
+    {
+      return true;
+    }
+  }
+  return false;
+}
+
+/** @brief Write the block header. Always written, so it always matches the payload. */
+static void writeHeader(void)
+{
+  lttBlockHeader header;
+  header.magic = EEPROM_LTT_MAGIC;
+  header.version = EEPROM_LTT_VERSION;
+  header.reserved[0] = 0U;
+  header.reserved[1] = 0U;
+  header.reserved[2] = 0U;
+  for (uint8_t i = 0; i < 4U; ++i) { header.trailing[i] = 0U; }
+  header.crc = payloadCrc();
+  updateObject(getStorageAPI(), header, EEPROM_LTT_BASE);
+}
+
+/**
+ * @brief The one place the payload is written.
+ *
+ * Payload first, header last. That ordering is the whole crash-safety design: if power is lost
+ * mid-save the stored CRC will not match the stored payload, and lttInit() then treats the
+ * block as corrupt and discards it. Losing one learn session is recoverable; applying half of
+ * one is not.
+ *
+ * BUDGET SEMANTICS - this matches every other page, and getting it wrong is what caused the
+ * burn-loop bug:
+ *
+ *   @p writesRemaining is a budget of *byte writes*. `updateBlockLimitWriteOps()` returns what
+ *   is left of it, and consumes one per byte that actually needed changing. So:
+ *     - nonzero return  => the burn happened to have budget left over (not "not finished")
+ *     - zero return     => the budget ran out, and the caller must ask again
+ *
+ *   `savePage()` clears the "burn pending" flag only when the budget hits zero, so a page that
+ *   cannot finish must return zero. The header is written only once the payload is completely
+ *   stored, which is what preserves the torn-save guarantee.
+ *
+ * @return Writes remaining. Zero means "budget exhausted, come back for more".
+ */
+static uint16_t writeBlock(uint16_t writesRemaining)
+{
+  const uint16_t remaining = updateBlockLimitWriteOps(getStorageAPI(),
+                                                     EEPROM_LTT_PAYLOAD,
+                                                     (const byte *)&lttData,
+                                                     ((const byte *)&lttData) + sizeof(lttData),
+                                                     writesRemaining);
+  if (remaining == 0U)
+  {
+    // Budget exhausted, so the payload may be incomplete. Do NOT touch the header: leaving the
+    // old CRC in place means a torn save is detected at the next boot rather than trusted.
+    return 0U;
+  }
+
+  // The payload is fully stored, so the header can now be made to describe it.
+  writeHeader();
+  lttDirty = false;
+
+  // Preserve the caller's remaining budget so the rest of the pages still get to use it.
+  return remaining;
+}
+
+/**
+ * @brief Persist the block immediately, ignoring the write budget.
+ *
+ * Safe for the key-off path (`lttSaveIfRequired()`), which runs at RPM 0 outside the burn loop
+ * and is not competing with a protocol-driven burn. The page-save path must use
+ * lttSaveBlock() instead - see the warning in ltt.h.
  *
  * @return true if storage is usable and the write completed.
  */
@@ -294,22 +378,44 @@ bool lttSave(void)
     return false;
   }
 
-  const storage_api_t &api = getStorageAPI();
+  // A budget large enough that it can never be exhausted, so every differing byte is written
+  // in this pass and the header is then written. Using LTT_PAYLOAD_SIZE here would be wrong:
+  // when every byte differs the budget is consumed exactly, which looks like "exhausted" and
+  // would skip the header write, leaving the block permanently dirty.
+  (void)writeBlock(UINT16_MAX);
+  return !lttDirty;
+}
 
-  updateObject(api, lttData, EEPROM_LTT_PAYLOAD);
+uint16_t lttSaveBlock(uint16_t writesRemaining)
+{
+  // Contract (matches every other page in savePage()): return 0 to mean "budget exhausted,
+  // call me again", and a nonzero value to mean "this page is done". savePage() clears the
+  // burn-pending flag only on a zero return.
+  //
+  // That makes the two "nothing to write" cases below the subtle ones. Returning 0 for them
+  // would say "come back with more budget", which the burn loop would obey forever - the exact
+  // bug this function exists to avoid. They must report the budget untouched instead.
 
-  lttBlockHeader header;
-  header.magic = EEPROM_LTT_MAGIC;
-  header.version = EEPROM_LTT_VERSION;
-  header.reserved[0] = 0U;
-  header.reserved[1] = 0U;
-  header.reserved[2] = 0U;
-  for (uint8_t i = 0; i < 4U; ++i) { header.trailing[i] = 0U; }
-  header.crc = payloadCrc();
-  updateObject(api, header, EEPROM_LTT_BASE);
+  if (!lttStorageOk)
+  {
+    // Cannot store anything at all (e.g. the 4,284-byte internal-EEPROM fallback, which cannot
+    // reach 0x1000). Report "done" so the burn terminates rather than retrying forever.
+    return writesRemaining;
+  }
 
-  lttDirty = false;
-  return true;
+  if (!lttDirty && !payloadDiffersFromStorage())
+  {
+    // Nothing has changed. Report "done" and consume no budget, so an unrelated full-tune burn
+    // does not rewrite 2 kB of untouched trims.
+    return writesRemaining;
+  }
+
+  return writeBlock(writesRemaining);
+}
+
+bool lttNeedsSave(void)
+{
+  return lttStorageOk && (lttDirty || payloadDiffersFromStorage());
 }
 
 /**
@@ -740,11 +846,13 @@ void setAllLttAuthority(uint8_t percent)
 void lttResetForTest(void)
 {
   setPageToDefaults();
-  // Deliberately NOT probeStorage(): the native test host has no storage API installed, so
-  // probeStorage() would report the feature unavailable and every closed-loop test would
-  // then see zero authority and clamp to no correction - testing nothing. Tests want the
-  // real logic with the default authority, so force the feature on.
-  lttStorageOk = true;
+  // Respect the installed storage API's actual size, so a test that deliberately installs a
+  // too-small backend (to prove the feature disables itself) sees the real behaviour. When the
+  // native test host has no storage API at all, `length()` returns 0 - in that case force the
+  // feature on, because the closed-loop tests need real authority and would otherwise be
+  // testing "clamped to zero" rather than the logic under test.
+  const uint16_t length = getStorageAPI().length();
+  lttStorageOk = (length == 0U) || probeStorage();
   lttReady = true;
   lttDirty = false;
 }

@@ -447,15 +447,18 @@ void savePage(uint8_t pageNum)
       /*---------------------------------------------------
       | Long-term trim block - Page 16 (See ltt.h for layout)
 
-      | Written through lttSave() rather than directly, because the block carries a header
-      | that must be rewritten whenever the payload changes. Writing the header last means an
-      | interrupted burn leaves a CRC that does not match, and lttInit() then discards the
-      | block instead of loading half of it.
+      | Written through lttSaveBlock() rather than directly, because the block carries a
+      | header that must be rewritten whenever the payload changes. Writing the header last
+      | means an interrupted burn leaves a CRC that does not match, and lttInit() then
+      | discards the block instead of loading half of it.
+
+      | IMPORTANT: this must consume and report the write budget like every other page. An
+      | earlier version called a save that always reported success, so writesRemaining was
+      | pinned to 0 and the pending flag was always cleared - which made the burn loop in
+      | speeduino.ino() re-enter saveAllPages() forever and wear the flash. That is a bug you
+      | only find in the field, so the budget is now honoured and asserted in a unit test.
       -----------------------------------------------------*/
-      if (lttSave())
-      {
-        writesRemaining = 0U;
-      }
+      writesRemaining = lttSaveBlock(writesRemaining);
       break;
 
     default:
