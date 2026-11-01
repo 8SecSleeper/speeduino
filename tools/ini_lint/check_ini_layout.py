@@ -63,8 +63,16 @@ SEPARATOR = "std_separator"
 # Anything else changing this digest means a real offset may have moved, which
 # silently invalidates existing .msq files. Update this constant only after
 # deliberately confirming that.
-EXPECTED_CONSTANTS_DIGEST = "24fc7b7d213a1f5f"
+EXPECTED_CONSTANTS_DIGEST = "ba58abbf60bc5d46"
 
+# Why this changed (from 24fc7b7d213a1f5f):
+#   rtCurveRetard widened from U08 to U16 and its scale changed from whole degrees to tenths of
+#   a degree (0.1, max 60.0), so a tuner can shape the retard ramp at finer than 1-degree
+#   resolution. It grew from 16 to 32 bytes, so the reserved tail moved from offset 84 to 100
+#   (rtUnused84_255 -> rtUnused100_255, 172 -> 156 bytes). Total payload is still 256 bytes.
+#   Page 17 is new in this branch and no tunes exist for it, so no stored value is affected;
+#   EEPROM_RACETIME_VERSION went 2 -> 3 so any block written by an earlier build is discarded.
+#
 # Why this changed (from 29cdd08ac19aec9e):
 #   Page 17's six spare-bit masks were relabelled from all-"INVALID" to all-"Unused". A 2-bit
 #   field with four INVALID options has no valid option for TunerStudio to map a saved value

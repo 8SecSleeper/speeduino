@@ -96,8 +96,10 @@ static void setPageToDefaults(void)
     static const uint16_t kDefaultTimes[RACETIME_CURVE_POINTS] =
       { 0U, 400U, 800U, 1200U, 1600U, 2000U, 2400U, 2800U,
         3200U, 3600U, 4000U, 4400U, 4800U, 5200U, 5600U, 6000U };
-    static const uint8_t kDefaultRetard[RACETIME_CURVE_POINTS] =
-      { 12U, 11U, 10U, 9U, 8U, 7U, 6U, 4U, 2U, 1U, 0U, 0U, 0U, 0U, 0U, 0U };
+    // Tenths of a degree, so 120 = 12.0 deg. The non-integer values give the ramp some shape
+    // instead of the staircase a whole-degree curve produces.
+    static const uint16_t kDefaultRetard[RACETIME_CURVE_POINTS] =
+      { 120U, 112U, 104U, 92U, 80U, 68U, 56U, 38U, 20U, 10U, 4U, 0U, 0U, 0U, 0U, 0U };
 
     for (uint8_t i = 0; i < RACETIME_CURVE_POINTS; ++i)
     {
@@ -227,7 +229,8 @@ static void clampSettings(void)
   // Retard beyond 60 degrees cannot be honoured by the scheduler and is not a real tune.
   for (uint8_t i = 0; i < RACETIME_CURVE_POINTS; ++i)
   {
-    if (s.curveRetard[i] > 60U) { s.curveRetard[i] = 60U; }
+    // The stored unit is tenths, so the 60-degree ceiling is 600.
+    if (s.curveRetard[i] > 600U) { s.curveRetard[i] = 600U; }
   }
 
   // The label must be NUL terminated within its own field, or TunerStudio and every string
@@ -394,11 +397,18 @@ static void bindArmPin(void)
   }
 
   // pinTranslate() maps the TunerStudio pin number to a board pin, exactly as it does for the
-  // launch, VSS and fan inputs. A pin that cannot be translated (reserved for the SD card, or
-  // an analog-only pin) resolves to 0 and leaves the input unbound rather than stealing it.
+  // launch, VSS and fan inputs.
+  //
+  // Note what is NOT checked here: pin 0. Zero is a perfectly valid board pin - board_definition.h
+  // defines NOT_A_PIN as UINT8_MAX precisely because zero cannot be used as the "unused" marker.
+  // An earlier version treated a translated 0 as "untranslatable", which silently refused pin 0
+  // while accepting every reserved pin it could not actually use. The real guards are
+  // pinIsReserved() and, below, pinIsOutput().
   const uint8_t pin = pinTranslate(configured);
-  if ((pin == 0U) || pinIsReserved(pin))
+  if (pinIsReserved(pin) || pinIsOutput(pin))
   {
+    // Reserved (SD card, serial) or already driven by the ECU: leave the input unbound rather
+    // than stealing a pin something else is using.
     raceTimeArmPin = 0U;
     raceTimePinBound = false;
     return;
@@ -677,14 +687,14 @@ void raceTimeUpdate(statuses &current)
   raceTimeTick1ms(current, readArmPin());
 }
 
-uint8_t raceTimeCurveRetard(void)
+uint16_t raceTimeCurveRetardTenths(void)
 {
   if (raceTimeData.enable == (uint8_t)RT_DISABLED) { return 0U; }
   if (raceTimeData.curveEnable == 0U) { return 0U; }
   if (raceTimeState != RT_STATE_RUNNING) { return 0U; }
 
   const uint16_t *times = raceTimeData.curveTimeMs;
-  const uint8_t *points = raceTimeData.curveRetard;
+  const uint16_t *points = raceTimeData.curveRetard;  // tenths of a degree
 
   // Before the first breakpoint (normally t=0) hold the first value. clampSettings() forces
   // times[0] to 0, so this only fires for a block that has never been loaded.
@@ -715,9 +725,9 @@ uint8_t raceTimeCurveRetard(void)
   const uint32_t t1 = (uint32_t)times[next];
   if (t1 <= t0) { return points[index]; } // guarded by clampSettings(), but never divide by 0
 
-  // Linear interpolation, rounded to nearest whole degree. The delta is signed: a descending
-  // curve (retard off the line, then give the timing back) is the common real shape, and an
-  // unsigned subtraction there would wrap to a huge positive number.
+  // Linear interpolation, rounded to nearest tenth. The delta is signed: a descending curve
+  // (retard off the line, then give the timing back) is the common real shape, and an unsigned
+  // subtraction there would wrap to a huge positive number.
   const int32_t a = (int32_t)points[index];
   const int32_t b = (int32_t)points[next];
   const int32_t delta = b - a;
@@ -731,6 +741,16 @@ uint8_t raceTimeCurveRetard(void)
 
   const int32_t result = a + (int32_t)rounded;
   if (result <= 0) { return 0U; }
-  if (result >= 255) { return 255U; }
-  return (uint8_t)result;
+  if (result > 600) { return 600U; }   // 60.0 deg
+  return (uint16_t)result;
+}
+
+uint8_t raceTimeCurveRetard(void)
+{
+  // The scheduler takes a whole-degree int8_t advance (see calculateIgnitionAngles), so the
+  // configured tenths are rounded to nearest here rather than truncated. Truncation would make
+  // 0.6 deg of retard do nothing, which is the opposite of what a tuner asking for sub-degree
+  // resolution wants.
+  const uint16_t tenths = raceTimeCurveRetardTenths();
+  return (uint8_t)((tenths + 5U) / 10U);
 }

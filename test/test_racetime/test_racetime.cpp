@@ -308,17 +308,18 @@ void test_curve_disabled_returns_zero(void)
 {
   raceTimeFixture f;
   raceTimeGetPageMutable().curveEnable = 0;
-  raceTimeGetPageMutable().curveRetard[0] = 20;
+  raceTimeGetPageMutable().curveRetard[0] = 200;   // 20.0 deg
   f.completeLaunch(10);
 
   TEST_ASSERT_EQUAL_UINT8(0U, raceTimeCurveRetard());
+  TEST_ASSERT_EQUAL_UINT16(0U, raceTimeCurveRetardTenths());
 }
 
 void test_curve_not_running_returns_zero(void)
 {
   raceTimeFixture f;
   raceTimeGetPageMutable().curveEnable = 1;
-  raceTimeGetPageMutable().curveRetard[0] = 20;
+  raceTimeGetPageMutable().curveRetard[0] = 200;
 
   // Armed but not released: no race time has elapsed, so no retard is applied.
   raceTimeTick1ms(f.current, true);
@@ -331,16 +332,15 @@ void test_curve_flat_is_flat(void)
   raceTimeGetPageMutable().curveEnable = 1;
   for (uint8_t i = 0; i < RACETIME_CURVE_POINTS; ++i)
   {
-    raceTimeGetPageMutable().curveRetard[i] = 12;
+    raceTimeGetPageMutable().curveRetard[i] = 125;   // 12.5 deg
   }
   f.completeLaunch(0);
 
-  f.advance(0);
-  TEST_ASSERT_EQUAL_UINT8(12U, raceTimeCurveRetard());
+  TEST_ASSERT_EQUAL_UINT16(125U, raceTimeCurveRetardTenths());
   f.advance(1234);
-  TEST_ASSERT_EQUAL_UINT8(12U, raceTimeCurveRetard());
+  TEST_ASSERT_EQUAL_UINT16(125U, raceTimeCurveRetardTenths());
   f.advance(5000);
-  TEST_ASSERT_EQUAL_UINT8(12U, raceTimeCurveRetard());
+  TEST_ASSERT_EQUAL_UINT16(125U, raceTimeCurveRetardTenths());
 }
 
 void test_curve_endpoints_are_exact(void)
@@ -349,14 +349,14 @@ void test_curve_endpoints_are_exact(void)
   raceTimeGetPageMutable().curveEnable = 1;
   f.setCurveSpan(1600); // 15 intervals of 100 ms
   raceTimeGetPageMutable().curveRetard[0] = 0;
-  raceTimeGetPageMutable().curveRetard[RACETIME_CURVE_POINTS - 1] = 15;
+  raceTimeGetPageMutable().curveRetard[RACETIME_CURVE_POINTS - 1] = 150;  // 15.0 deg
   f.completeLaunch(0);
 
-  TEST_ASSERT_EQUAL_UINT8(0U, raceTimeCurveRetard());
+  TEST_ASSERT_EQUAL_UINT16(0U, raceTimeCurveRetardTenths());
 
   // Past the end of the span the final point is held, not extrapolated.
   f.advance(5000);
-  TEST_ASSERT_EQUAL_UINT8(15U, raceTimeCurveRetard());
+  TEST_ASSERT_EQUAL_UINT16(150U, raceTimeCurveRetardTenths());
 }
 
 void test_curve_interpolates_between_points(void)
@@ -366,18 +366,53 @@ void test_curve_interpolates_between_points(void)
   f.setCurveSpan(1500); // 15 intervals of 100 ms
   for (uint8_t i = 0; i < RACETIME_CURVE_POINTS; ++i)
   {
-    // point i == i degrees, so halfway between point 0 and point 1 is 0.5 -> 1 (rounded)
-    raceTimeGetPageMutable().curveRetard[i] = i;
+    // point i == i whole degrees == 10*i tenths
+    raceTimeGetPageMutable().curveRetard[i] = (uint16_t)(i * 10U);
   }
   f.completeLaunch(0);
 
-  TEST_ASSERT_EQUAL_UINT8(0U, raceTimeCurveRetard()); // t=0, point 0
-  f.advance(50);                                      // halfway between 0 and 100 ms
-  TEST_ASSERT_EQUAL_UINT8(1U, raceTimeCurveRetard()); // 0.5 rounds up
-  f.advance(50);                                      // t=100, point 1
+  TEST_ASSERT_EQUAL_UINT16(0U, raceTimeCurveRetardTenths());    // t=0, point 0
+  f.advance(50);                                               // halfway to point 1
+  TEST_ASSERT_EQUAL_UINT16(5U, raceTimeCurveRetardTenths());    // 0.5 deg
+  f.advance(50);                                               // t=100, point 1
+  TEST_ASSERT_EQUAL_UINT16(10U, raceTimeCurveRetardTenths());
+  f.advance(100);                                              // t=200, point 2
+  TEST_ASSERT_EQUAL_UINT16(20U, raceTimeCurveRetardTenths());
+}
+
+void test_curve_resolves_below_one_degree(void)
+{
+  // The point of storing tenths: a curve that only ever asks for a fraction of a degree must
+  // report that fraction, not collapse to zero.
+  raceTimeFixture f;
+  raceTimeGetPageMutable().curveEnable = 1;
+  for (uint8_t i = 0; i < RACETIME_CURVE_POINTS; ++i)
+  {
+    raceTimeGetPageMutable().curveRetard[i] = 4;   // 0.4 deg everywhere
+  }
+  f.completeLaunch(100);
+  TEST_ASSERT_EQUAL_UINT16(4U, raceTimeCurveRetardTenths());
+}
+
+void test_curve_rounds_to_nearest_degree_for_the_scheduler(void)
+{
+  raceTimeFixture f;
+  raceTimeGetPageMutable().curveEnable = 1;
+  for (uint8_t i = 0; i < RACETIME_CURVE_POINTS; ++i)
+  {
+    raceTimeGetPageMutable().curveRetard[i] = 4;   // 0.4 deg
+  }
+  f.completeLaunch(100);
+
+  // 0.4 rounds DOWN to 0 whole degrees - the scheduler genuinely cannot resolve it.
+  TEST_ASSERT_EQUAL_UINT8(0U, raceTimeCurveRetard());
+
+  for (uint8_t i = 0; i < RACETIME_CURVE_POINTS; ++i)
+  {
+    raceTimeGetPageMutable().curveRetard[i] = 6;   // 0.6 deg
+  }
+  // 0.6 rounds UP to 1: truncating would silently discard it.
   TEST_ASSERT_EQUAL_UINT8(1U, raceTimeCurveRetard());
-  f.advance(100);                                     // t=200, point 2
-  TEST_ASSERT_EQUAL_UINT8(2U, raceTimeCurveRetard());
 }
 
 void test_curve_handles_descending_values(void)
@@ -387,15 +422,15 @@ void test_curve_handles_descending_values(void)
   f.setCurveSpan(1500);
   for (uint8_t i = 0; i < RACETIME_CURVE_POINTS; ++i)
   {
-    // Descending: 15, 14, 13 ... This is the common real shape - retard off the line, then
-    // give the timing back. A naive unsigned interpolation wraps here.
-    raceTimeGetPageMutable().curveRetard[i] = (uint8_t)(15U - i);
+    // Descending: 15.0, 14.0, 13.0 ... The common real shape - retard off the line, then give
+    // the timing back. A naive unsigned interpolation wraps here.
+    raceTimeGetPageMutable().curveRetard[i] = (uint16_t)((15U - i) * 10U);
   }
   f.completeLaunch(0);
 
-  TEST_ASSERT_EQUAL_UINT8(15U, raceTimeCurveRetard());
+  TEST_ASSERT_EQUAL_UINT16(150U, raceTimeCurveRetardTenths());
   f.advance(1500);
-  TEST_ASSERT_EQUAL_UINT8(0U, raceTimeCurveRetard());
+  TEST_ASSERT_EQUAL_UINT16(0U, raceTimeCurveRetardTenths());
 }
 
 void test_curve_axis_repaired_if_not_ascending(void)
@@ -452,7 +487,7 @@ void test_defaults_are_a_usable_drag_configuration(void)
   TEST_ASSERT_EQUAL_UINT8(0U, c.armPullup);
 
   // False-start detection on, with a small non-zero threshold: a staged car is stationary,
-  // so 2 km/h of movement before the release is already a fault.
+  // so 2 mph of movement before the release is already a fault.
   TEST_ASSERT_EQUAL_UINT8((uint8_t)RT_MOTION_VSS, c.motionSource);
   TEST_ASSERT_TRUE(c.falseStartSpeed > 0U);
 
@@ -467,10 +502,10 @@ void test_default_curve_is_a_descending_retard_ramp(void)
 
   // Retard off the line for traction, then give the timing back. This is the shape a turbo
   // drag car actually runs; a flat or all-zero curve is the bug this test exists to prevent.
-  TEST_ASSERT_TRUE_MESSAGE(c.curveRetard[0] >= 8U,
-                           "Default must pull real timing at the hit, not a token amount");
-  TEST_ASSERT_EQUAL_UINT8_MESSAGE(0U, c.curveRetard[RACETIME_CURVE_POINTS - 1U],
-                                  "Default must give all the timing back by the end of the ramp");
+  TEST_ASSERT_TRUE_MESSAGE(c.curveRetard[0] >= 80U,
+                           "Default must pull real timing at the hit (>= 8.0 deg)");
+  TEST_ASSERT_EQUAL_UINT16_MESSAGE(0U, c.curveRetard[RACETIME_CURVE_POINTS - 1U],
+                                   "Default must give all the timing back by the end of the ramp");
 
   // Monotonically non-increasing: never retard more later in the run than off the line.
   for (uint8_t i = 1; i < RACETIME_CURVE_POINTS; ++i)
@@ -479,7 +514,6 @@ void test_default_curve_is_a_descending_retard_ramp(void)
                              "Default curve must not increase retard as the run progresses");
   }
 
-  // And the ramp must finish well before the end of a pass, not at 6 s.
   TEST_ASSERT_TRUE(c.curveTimeMs[RACETIME_CURVE_POINTS - 1U] >= 4000U);
 }
 
@@ -642,6 +676,8 @@ void testRaceTime(void)
     RUN_TEST(test_curve_endpoints_are_exact);
     RUN_TEST(test_curve_interpolates_between_points);
     RUN_TEST(test_curve_handles_descending_values);
+    RUN_TEST(test_curve_resolves_below_one_degree);
+    RUN_TEST(test_curve_rounds_to_nearest_degree_for_the_scheduler);
     RUN_TEST(test_curve_axis_repaired_if_not_ascending);
     RUN_TEST(test_default_curve_axis_is_ascending);
     RUN_TEST(test_defaults_are_a_usable_drag_configuration);

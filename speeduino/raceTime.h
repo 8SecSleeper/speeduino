@@ -85,10 +85,13 @@ constexpr uint32_t EEPROM_RACETIME_MAGIC = 0x52414345;
  * changed. Reading one as a v2 block is exactly what produced 2147483647 in every curve cell
  * and nonsense in the threshold fields.
  *
+ * v2 -> v3: `curveRetard` widened from uint8 (whole degrees) to uint16 (tenths of a degree),
+ * moving `reserved1` from 84 to 100. Same 256-byte payload, different meaning.
+ *
  * The CRC cannot catch this on its own: it validates integrity, not meaning. The version byte
  * is the only thing that distinguishes "written by an older build" from "corrupt".
  */
-constexpr uint8_t EEPROM_RACETIME_VERSION = 2;
+constexpr uint8_t EEPROM_RACETIME_VERSION = 3;
 
 /** @brief Size of the block header, in bytes. Must stay a multiple of 2 for alignment. */
 constexpr uint16_t EEPROM_RACETIME_HEADER_SIZE = 16;
@@ -195,10 +198,21 @@ struct raceTimeConfig : public config_page_t {
   /// makes a curve unreadable in the tuning software and unpredictable in the lookup.
   uint16_t curveTimeMs[RACETIME_CURVE_POINTS];
 
-  /// Retard in whole degrees at each breakpoint, 0..60.
-  uint8_t curveRetard[RACETIME_CURVE_POINTS];
+  /// Retard at each breakpoint, in TENTHS of a degree (0..600 = 0.0..60.0 deg).
+  ///
+  /// Whole degrees are too coarse here: a drag car's retard curve is used to shape how hard the
+  /// car leaves, and 1 degree is a visible step in that. Storage costs 16 extra bytes, which is
+  /// free inside a 256-byte page.
+  ///
+  /// Note this is the CONFIGURED resolution only. The ignition scheduler takes an `int8_t`
+  /// advance in whole degrees (see `calculateIgnitionAngles`), so the firmware converts tenths
+  /// to whole degrees at the point of use - rounding to nearest, not truncating, so a 0.6 value
+  /// still produces one degree of retard. Making the engine actually honour tenths would mean
+  /// widening `statuses::advance` and the spark-angle maths, which is a far bigger change than
+  /// this feature and is not attempted here.
+  uint16_t curveRetard[RACETIME_CURVE_POINTS];
 
-  uint8_t reserved1[RACETIME_PAYLOAD_SIZE - 84U]; ///< Reserved, must be 0.
+  uint8_t reserved1[RACETIME_PAYLOAD_SIZE - 100U]; ///< Reserved, must be 0.
 };
 
 /** @brief `raceTimeConfig::enable` values. */
@@ -225,9 +239,9 @@ enum RaceTimeEnable : uint8_t {
 //   falseStartSpeed        2 B  @  12
 //   reserved00             2 B  @  14
 //   curveLabel            20 B  @  16
-//   curveTimeMs           32 B  @  36   (16 x uint16)
-//   curveRetard           16 B  @  68   (16 x uint8)
-//   reserved1            172 B  @  84
+//   curveTimeMs           32 B  @  36   (16 x uint16, milliseconds)
+//   curveRetard           32 B  @  68   (16 x uint16, tenths of a degree)
+//   reserved1            156 B  @ 100
 //                              -------
 //   payload              256 B
 static_assert(offsetof(raceTimeConfig, enable) == 0,    "raceTimeConfig.enable must be at offset 0");
@@ -245,7 +259,7 @@ static_assert(offsetof(raceTimeConfig, reserved00) == 14,"raceTimeConfig.reserve
 static_assert(offsetof(raceTimeConfig, curveLabel) == 16,"raceTimeConfig.curveLabel must be at offset 16");
 static_assert(offsetof(raceTimeConfig, curveTimeMs) == 36,"raceTimeConfig.curveTimeMs must be at offset 36");
 static_assert(offsetof(raceTimeConfig, curveRetard) == 68,"raceTimeConfig.curveRetard must be at offset 68");
-static_assert(offsetof(raceTimeConfig, reserved1) == 84,"raceTimeConfig.reserved1 must be at offset 84");
+static_assert(offsetof(raceTimeConfig, reserved1) == 100,"raceTimeConfig.reserved1 must be at offset 100");
 static_assert(sizeof(raceTimeConfig) == RACETIME_PAYLOAD_SIZE,
               "raceTimeConfig size changed - update pageSize in speeduino.ini");
 
@@ -331,10 +345,21 @@ void raceTimeReset(void);
 void raceTimeTriggerStart(void);
 
 /**
- * @brief Retard from the retard-vs-race-time curve at the current race time.
+ * @brief Retard from the retard-vs-race-time curve, in TENTHS of a degree.
  *
- * This is the reference consumer. It exists to prove the clock is usable, and to give the
- * tuner something to see on the first pass rather than a channel that only ever reads zero.
+ * The curve is configured and interpolated in tenths so a tuner can shape the ramp at finer
+ * than 1-degree steps. This function returns the interpolated value at the current race time.
+ *
+ * @return Retard in tenths of a degree (0..600), 0 when disabled, not running, or flat.
+ */
+uint16_t raceTimeCurveRetardTenths(void);
+
+/**
+ * @brief The same retard, rounded to whole degrees.
+ *
+ * This is what reaches the ignition scheduler, because `statuses::advance` and
+ * `calculateIgnitionAngles()` are whole-degree `int8_t`. Rounding is to nearest, so a
+ * configured 0.6 still produces one degree of retard rather than nothing.
  *
  * @return Retard in whole degrees, 0 when disabled, not running, or the curve is flat.
  */
