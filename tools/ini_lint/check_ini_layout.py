@@ -63,7 +63,7 @@ SEPARATOR = "std_separator"
 # Anything else changing this digest means a real offset may have moved, which
 # silently invalidates existing .msq files. Update this constant only after
 # deliberately confirming that.
-EXPECTED_CONSTANTS_DIGEST = "e82634479de54bf0"
+EXPECTED_CONSTANTS_DIGEST = "37c19aceb4e9890b"
 
 # Why this changed (from 5aa79bb2d9f87b2e):
 #   Restructured the launch pages and added page 20. Still an APPEND plus a rework of pages that
@@ -751,6 +751,57 @@ def check(path: str, strict: bool, verbose: bool) -> int:
             rep.info("OCH-SLACK",
                      f"ochBlockSize={och_size} but the highest declared channel is {widest}; "
                      f"{och_size - 1 - widest} unused byte(s) are sent on every poll", 0)
+
+    # ---- curves reference declared constants, and every page has constants ----
+    # Two failures that TunerStudio reports as hard errors and that nothing else here caught:
+    #
+    #   CURVE-BIN-UNDEFINED  `xBins = foo` where foo is not a [Constants] field. TunerStudio
+    #                        aborts the ini with "CurveGraph xBin not a valid Constant".
+    #   PAGE-NO-CONSTANTS    a declared page (nPages) with no `page = N` block. Deleting a page
+    #                        block leaves every reference to its fields dangling, and the ini
+    #                        still parses - so the failure surfaces only in TunerStudio.
+    # A curve bin may legitimately name a [Constants] field OR a [PcVariables] array. The latter
+    # are the calculated/derived series (wueAFR, wueRecommended, ...) that TunerStudio computes
+    # rather than stores, and referencing one is valid.
+    curve_bin_names = set()
+    page_blocks = set()
+    in_bin_section = False
+    for raw in ini.lines:
+        line = strip_comment(raw).strip()
+        if not line:
+            continue
+        if line.startswith("[") and line.endswith("]"):
+            section = line[1:-1].strip().lower()
+            in_bin_section = section in ("constants", "pcvariables")
+            continue
+        if in_bin_section:
+            m = re.match(r"^([A-Za-z_]\w*)\s*=", line)
+            if m:
+                curve_bin_names.add(m.group(1))
+        m = re.match(r"^page\s*=\s*(\d+)\s*$", line, re.I)
+        if m:
+            page_blocks.add(int(m.group(1)))
+
+    for i, raw in enumerate(ini.lines):
+        line = strip_comment(raw).strip()
+        m = re.match(r"^(x|y)Bins\s*=\s*([A-Za-z_]\w*)\s*$", line, re.I)
+        if m:
+            target = m.group(2)
+            if target not in curve_bin_names:
+                rep.error("CURVE-BIN-UNDEFINED",
+                          f"curve {m.group(1)}Bins references '{target}', which is not declared "
+                          f"in [Constants] or [PcVariables]. TunerStudio aborts the ini with "
+                          f"\"CurveGraph {m.group(1)}Bin not a valid Constant\".", i + 1)
+
+    # Every page 1..nPages needs its own block. Page 0 is the implicit zero page.
+    if declared_npages:
+        for pg in range(1, declared_npages + 1):
+            if pg not in page_blocks:
+                rep.error("PAGE-NO-CONSTANTS",
+                          f"pageSize declares {declared_npages} pages but there is no "
+                          f"`page = {pg}` block. Every field on that page is undefined, and "
+                          f"TunerStudio will report each reference as an invalid Constant.",
+                          0)
 
     # ---- array defaultValue arity ------------------------------------------
     # An array `defaultValue =` must supply exactly as many values as the array's shape. A
