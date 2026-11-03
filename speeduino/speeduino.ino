@@ -31,6 +31,8 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 #include "ltt.h"
 #include "raceTime.h"
 #include "torqueRequest.h"
+#include "ppLaunch.h"
+#include "boostLaunch.h"
 #include "timers.h"
 #include "decoders.h"
 #include "src/controllers/idle/idle.h"
@@ -304,6 +306,13 @@ BEGIN_LTO_ALWAYS_INLINE(void) loop(void)
     torqueBusReset();
     // FND-05's reference consumer: retard vs race time. Cheap when the curve is off.
     torqueRequestRetard(TorqueProducer::RaceTime, (int8_t)raceTimeCurveRetard());
+    // Launch control (pages 18/19). Ungated, because the torque bus it publishes to was just
+    // cleared and every producer must restate its demand on every pass. Curve evaluation is
+    // per-pass too: a launch is exactly where sub-millisecond resolution matters.
+    ppLaunchUpdate(currentStatus, configPage2);
+    // Launch boost target (page 20). Runs after the launch update because it reads the launch
+    // state and clock, and it must contribute nothing unless launch is actually running.
+    boostLaunchUpdate(currentStatus);
 
     // FND-05 race-time framework. Ticked from the 1 kHz bit because it IS the millisecond
     // base - running it at any other rate makes currentStatus.raceTimeMs a lie, and every
@@ -311,6 +320,12 @@ BEGIN_LTO_ALWAYS_INLINE(void) loop(void)
     if (BIT_CHECK(currentStatus.LOOP_TIMER, BIT_TIMER_1KHZ))
     {
       raceTimeUpdate(currentStatus);
+
+      // Perfect-pass launch control's clock. Ticked from the same 1 kHz gate for the same reason:
+      // it is the millisecond base the launch curves are indexed against. It counts its own
+      // milliseconds rather than borrowing raceTimeMs, because that clock is gated on the
+      // race-time feature's own enable flag - see the design contract in ppLaunch.h.
+      ppLaunchTick1ms(currentStatus);
 
       // Republish the clock and state every millisecond so a consumer reading them from the
       // same pass sees a coherent snapshot.

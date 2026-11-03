@@ -2,6 +2,8 @@
 #include "../../../globals.h"
 #include "../../../unit_testing.h"
 #include "../../../units.h"
+#include "../../../boostLaunch.h"
+#include "../../../ppLaunch.h"
 #include "../../PID/integerPID_ideal.h"
 #include "../../../timers.h"
 #include "../../pwm/PwmOutputChannel.h"
@@ -105,7 +107,16 @@ static uint16_t getBoostDuty(const statuses &current, const config2 &page2, cons
   return clamp(duty, (uint16_t)0, percentToDuty(100U));
 }
 
-static uint16_t getBoostTarget(const statuses &current, const config2 &page2, const config9 &page9)
+/**
+ * @brief The BASE boost target, before any runtime modifier is applied.
+ *
+ * This is separated from the modifier chain below on purpose. A feature that needs to substitute
+ * the target - launch boost, and later traction control - must supply the BASE, so that flex-fuel
+ * compensation and everything else still stacks on top of it. Overwriting the FINAL target would
+ * silently disable flex and every future modifier, and the tuner would see a target that ignored
+ * half their tune with nothing in the log explaining why.
+ */
+static uint16_t getBaseBoostTarget(const statuses &current, const config2 &page2, const config9 &page9)
 {
   uint16_t target = 0;
   if (getBoostByGearMode(page2, page9) == BoostByGearMode::Percent)
@@ -125,8 +136,27 @@ static uint16_t getBoostTarget(const statuses &current, const config2 &page2, co
     //Boost target table is in kpa and divided by 2
     target = lookupBoostTable(current);
   }
+  return target;
+}
+
+static uint16_t getBoostTarget(const statuses &current, const config2 &page2, const config9 &page9)
+{
+  // ---- 1. base target -----------------------------------------------------------------
+  // While the launch boost window is open it supplies the BASE. Outside that window - or with
+  // the feature switched off - boostLaunchIsActive() is false and this is exactly the tune's own
+  // target, with no "hold the last value" state left behind.
+  uint16_t target = boostLaunchIsActive() ? boostLaunchBaseTarget()
+                                          : getBaseBoostTarget(current, page2, page9);
+
+  // ---- 2. flex fuel, and any future target modifier -----------------------------------
+  // Additive and applied AFTER the base is chosen, so launch boost cannot disable it. This is
+  // the ordering that makes the two features compose: switching launch boost on changes where
+  // the target starts from, not whether the rest of the tune still applies.
+  //
+  // A future traction-control target modifier belongs in this same chain, below this line.
+  //
   // flexBoostCorrection is int16_t; beware of conversion under-/over-flow
-  int16_t correctedTarget = (int16_t)target+current.flexBoostCorrection;
+  int16_t correctedTarget = (int16_t)target + current.flexBoostCorrection;
   return clamp(correctedTarget, (int16_t)0, (int16_t)511);
 }
 
@@ -218,6 +248,7 @@ TESTABLE_STATIC void boostControlCore(statuses &current, const config2 &page2, c
       // target once every ~3.3 SECONDS, not 10x/second. The caller now owns a single 200Hz gate and
       // this runs on every call. See roadmap §6B P3.
       current.flexBoostCorrection = getFlexCorrection(current, page2);
+      // Base target (launch or the tune's own) + modifiers, in that order. See getBoostTarget().
       current.boostTarget = getBoostTarget(current, page2, page9);
       current.boostDuty = convertTargetToDuty(current, page2, page6, page10);
 
@@ -238,6 +269,25 @@ TESTABLE_STATIC void boostControlCore(statuses &current, const config2 &page2, c
     current.boostDuty = 0;
     current.flexBoostCorrection = 0;
   }
+
+  // ---- 3. duty trim ---------------------------------------------------------------------
+  // Applied on the single exit path so it covers all three producers of duty: open loop, the
+  // closed-loop PID, and the boostDCWhenDisabled spool override. Reduction only (0..100%), so it
+  // cannot raise duty and cannot fight boostMinDuty/boostMaxDuty, which the PID has already
+  // applied by this point.
+  //
+  // Two sources, combined as the LARGEST rather than the sum - the same arbitration rule the
+  // torque bus uses, and for the same reason: two systems each asking for 30% off do not mean
+  // 60% off, and summing is how you end up with a solenoid commanded to nothing.
+  uint8_t trimPercent = boostLaunchDutyTrim();
+  const uint8_t launchTrim = ppLaunchBoostTrim();
+  if (launchTrim > trimPercent) { trimPercent = launchTrim; }
+
+  if ((trimPercent > 0U) && (current.boostDuty > 0U))
+  {
+    current.boostDuty = (uint16_t)(((uint32_t)current.boostDuty * (100U - trimPercent)) / 100U);
+  }
+
   applyDutyToPwm(current);
 }
 

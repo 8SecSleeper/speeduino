@@ -8,7 +8,10 @@
 static constexpr uint8_t expected_2byte_keys[] = {
   4, 14, 17, 22, 26, 28, 33, 42, 44, 46, 48, 50, 52, 54, 56, 58, 60, 62,
   64, 66, 68, 70, 72, 76, 78, 80, 82, 86, 88, 90, 93, 95, 99, 104, 111,
-  121, 125, 130, 132, 134, 136, 138, 140
+  121, 125, 130, 132, 134, 136, 138, 140,
+  // Perfect-pass launch control channels 145..155: four U16/S16 scalars, each occupying its index
+  // and the one after it. The continuation bytes (146, 148, 150, 152) must NOT be listed.
+  145, 147, 149, 151
 };
 
 static bool isInExpected(uint8_t key)

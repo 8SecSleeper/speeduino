@@ -6,6 +6,8 @@
 #include "prog_mem_support.h"
 #include "ltt.h"
 #include "raceTime.h"
+#include "ppLaunch.h"
+#include "boostLaunch.h"
 
 // This minimizes RAM usage at no performance cost
 #pragma GCC optimize ("Os") 
@@ -373,6 +375,20 @@ static page_map_t getPageMap(uint8_t pageNumber)
   static constexpr entity_t raceTimePageMap[] PROGMEM = {
     makeEntity(&raceTimeData, sizeof(raceTimeBlock)),
   };
+  // Pages 18 and 19: the perfect-pass launch reference curves. Single raw entities for the same
+  // reason as pages 16 and 17 - TunerStudio page offsets must map linearly onto the payload.
+  // Two pages rather than one plus a mode flag, so switching modes costs the tuner nothing.
+  static constexpr entity_t ppLaunchPageMap[] PROGMEM = {
+    makeEntity(&ppLaunchSpeedData, sizeof(ppLaunchSpeedBlock)),
+  };
+  static constexpr entity_t ppLaunchRpmPageMap[] PROGMEM = {
+    makeEntity(&ppLaunchRpmData, sizeof(ppLaunchRpmBlock)),
+  };
+  // Page 20: the launch boost target curve. A single raw entity for the same reason as the pages
+  // above - TunerStudio page offsets must map linearly onto the payload.
+  static constexpr entity_t boostLaunchPageMap[] PROGMEM = {
+    makeEntity(&boostLaunchData, sizeof(boostLaunchBlock)),
+  };
 
   static constexpr page_map_t pageMaps[MAX_PAGE_NUM] PROGMEM = {
     { pageZeroMap, _countof(pageZeroMap) },
@@ -393,6 +409,9 @@ static page_map_t getPageMap(uint8_t pageNumber)
     { boostVvt2PageMap, _countof(boostVvt2PageMap) },
     { lttPageMap, _countof(lttPageMap) },
     { raceTimePageMap, _countof(raceTimePageMap) },
+    { ppLaunchPageMap, _countof(ppLaunchPageMap) },
+    { ppLaunchRpmPageMap, _countof(ppLaunchRpmPageMap) },
+    { boostLaunchPageMap, _countof(boostLaunchPageMap) },
   };
 
   if (pageNumber>=MAX_PAGE_NUM)
@@ -483,6 +502,10 @@ void __attribute__((noinline)) setTuneToEmpty(void) {
   // Give it its real defaults instead.
   lttRestoreDefaults();
   raceTimeRestoreDefaults();
+  // Same reasoning as the trim block: zeroing a launch curve gives zero RPM limits, which reads
+  // as "no limiter configured" everywhere the curve is consulted. Give the tuner a real template.
+  ppLaunchRestoreDefaults();
+  boostLaunchRestoreDefaults();
 }
 
 uint16_t getPageSize(byte pageNum)

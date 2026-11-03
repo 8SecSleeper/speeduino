@@ -60,6 +60,14 @@ static void test_loadAllPages(void)
         if (page==raceTimePage) {
             continue;
         }
+        // Pages 18, 19 and 20 (launch control and launch boost) are excluded for the same
+        // reason and by the same mechanism as pages 16 and 17: they sit above the core tune block
+        // with their own magic/version/CRC headers, and initialisePpLaunch() (see
+        // speeduino/ppLaunch.cpp) is what decides whether to load them. Loading them here would
+        // apply an unvalidated launch curve - i.e. unvalidated ignition retard and a rev limit.
+        if ((page==ppLaunchPage) || (page==ppLaunchRpmPage) || (page==boostLaunchPage)) {
+            continue;
+        }
         assert_page(page, BUFFER_MARKER);
     }
 }

@@ -63,8 +63,44 @@ SEPARATOR = "std_separator"
 # Anything else changing this digest means a real offset may have moved, which
 # silently invalidates existing .msq files. Update this constant only after
 # deliberately confirming that.
-EXPECTED_CONSTANTS_DIGEST = "ba58abbf60bc5d46"
+EXPECTED_CONSTANTS_DIGEST = "d08cdf4085da2848"
 
+# Why this changed (from 5aa79bb2d9f87b2e):
+#   Restructured the launch pages and added page 20. Still an APPEND plus a rework of pages that
+#   are new in this branch and have no saved tunes against them:
+#
+#     - page 19 was REDUCED from a full second copy of the speed page to the simple mode it was
+#       meant to be: an RPM limit versus time, a soft retard with a hysteresis band, and a cut
+#       method. All of page 19's fields changed, but page 19 is new in this same branch and
+#       EEPROM_PPLAUNCH_VERSION was bumped, so no stored block is affected.
+#     - page 18 lost its boost TARGET curve (that moved to page 20) and kept only a duty TRIM,
+#       freeing 32 bytes that went to reserved. Offsets after curveBoostTrim moved, but again
+#       this is a page new in this branch.
+#     - page 20 is NEW (launch boost target, in the Boost menu) with a 1024-byte payload: 192
+#       bytes used, 832 reserved for the full boost control feature set.
+#     - nPages 19 -> 20, pageSize +1024, all seven per-page protocol lists extended to 20.
+#
+#   No offset on any PRE-EXISTING page (1..17) moved, so every saved .msq keeps its meaning.
+#
+# Why this changed (from ba58abbf60bc5d46):
+#   Added pages 18 and 19 (perfect-pass launch control, speed based and RPM based). This is a
+#   pure APPEND: nPages went 17 -> 19, two 512-byte entries were added to pageSize, and two new
+#   `page = 18` / `page = 19` constant blocks were added. No existing offset moved, so every
+#   saved .msq keeps its meaning and every existing page keeps its layout.
+#
+#   Deliberately TWO pages rather than one page plus a mode flag. A tuner who has dialled in a
+#   speed-based curve must be able to run RPM mode for a pass and come back without re-entering
+#   32 rows of data; 1024 bytes of a 17 kB free budget is a good trade for that.
+#
+#   Also updated in the same change, and each one is a place a previous commit forgot:
+#     - all seven per-page protocol lists (pageIdentifier x12/x13 added, and the five command
+#       templates extended) - omitting these makes TunerStudio silently fail to burn page 18/19,
+#       which is exactly the page-17 data-loss bug this project already shipped once;
+#     - [OutputChannels] gained channels 145..155 and ochBlockSize went 146 -> 157, matching
+#       LOG_ENTRY_SIZE 145 -> 156 in logger.h and the fsIntIndex entries for the four new U16/S16
+#       channels (145, 147, 149, 151 - the following byte of each must NOT be listed);
+#     - defaultValue entries for both new pages.
+#
 # Why this changed (from 24fc7b7d213a1f5f):
 #   rtCurveRetard widened from U08 to U16 and its scale changed from whole degrees to tenths of
 #   a degree (0.1, max 60.0), so a tuner can shape the retard ramp at finer than 1-degree

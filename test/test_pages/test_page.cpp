@@ -230,8 +230,21 @@ static uint16_t sumEntitySizes(uint8_t pageNum)
 
 static void test_sumEntity_matches_pageSize(void)
 {
-    // Page sizes as defined in the .ini file
-    constexpr uint16_t ini_page_sizes[] = { 0, 128, 288, 288, 128, 288, 128, 240, 384, 192, 192, 288, 192, 128, 288, 256, 2064, 256 };
+    // Page sizes as defined in the .ini file.
+    //
+    // This array is a MIRROR of pageSize in reference/speeduino.ini and must be extended with it.
+    // It is the only thing that cross-checks the firmware's entity sizes against the tuning file
+    // for pages the linter cannot see, so a page added to the ini and not here fails loudly
+    // rather than silently - keep it in step.
+    constexpr uint16_t ini_page_sizes[] = {
+        0,    // page 0 is not addressable, placeholder
+        128, 288, 288, 128, 288, 128, 240, 384, 192, 192, 288, 192, 128, 288, 256, 2064, 256,
+        512,   // page 18: launch control, speed based
+        512,   // page 19: launch control, RPM based (simple: time vs RPM + soft retard)
+        1024   // page 20: launch boost target (in the Boost menu)
+    };
+    static_assert(sizeof(ini_page_sizes) / sizeof(ini_page_sizes[0]) == MAX_PAGE_NUM,
+                  "ini_page_sizes must have one entry per page - extend it when adding a page");
 
     for (uint8_t pageNum=MIN_PAGE_NUM; pageNum<MAX_PAGE_NUM; ++pageNum)
     {

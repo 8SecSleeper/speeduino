@@ -17,6 +17,8 @@ A full copy of the license may be found in the projects root directory
 #include "storage_details.h"
 #include "ltt.h"
 #include "raceTime.h"
+#include "ppLaunch.h"
+#include "boostLaunch.h"
 
 using namespace storage::details;
 
@@ -210,6 +212,9 @@ TESTABLE_STATIC uint16_t getEntityStartAddress(page_iterator_t iter) {
     { &configPage15, EEPROM_CONFIG15_START },
     { &lttData, EEPROM_LTT_PAYLOAD },
     { &raceTimeData, EEPROM_RACETIME_PAYLOAD },
+    { &ppLaunchSpeedData, EEPROM_PPLAUNCH_SPEED_PAYLOAD },
+    { &ppLaunchRpmData, EEPROM_PPLAUNCH_RPM_PAYLOAD },
+    { &boostLaunchData, EEPROM_BOOSTLAUNCH_PAYLOAD },
   };
   static const constexpr entity_storage_map_t* entityMapEnd = entityMap + _countof(entityMap);
 
@@ -474,6 +479,37 @@ void savePage(uint8_t pageNum)
       writesRemaining = raceTimeSaveBlock(writesRemaining);
       break;
 
+    case ppLaunchPage:
+      /*---------------------------------------------------
+      | Perfect-pass launch, speed mode - Page 18 (See ppLaunch.h for layout)
+
+      | Same contract as pages 16 and 17: the block carries a CRC header that must describe the
+      | payload, so it is written through ppLaunchSaveBlock() rather than directly. The budget
+      | MUST be reported back - see the warning on the ltt branch above.
+      -----------------------------------------------------*/
+      writesRemaining = ppLaunchSaveBlock(PP_MODE_SPEED, writesRemaining);
+      break;
+
+    case ppLaunchRpmPage:
+      /*---------------------------------------------------
+      | Perfect-pass launch, RPM mode - Page 19 (See ppLaunch.h for layout)
+
+      | A separate page and a separate block on purpose: a tuner switching between speed-based
+      | and RPM-based launch must not have to re-enter either table. Same header contract again.
+      -----------------------------------------------------*/
+      writesRemaining = ppLaunchSaveBlock(PP_MODE_RPM, writesRemaining);
+      break;
+
+    case boostLaunchPage:
+      /*---------------------------------------------------
+      | Launch boost target - Page 20 (See boostLaunch.h for layout)
+
+      | Lives in the Boost menu with its own block and CRC header, like every other feature that
+      | owns persisted state. Same budget contract as the pages above.
+      -----------------------------------------------------*/
+      writesRemaining = boostLaunchSaveBlock(writesRemaining);
+      break;
+
     default:
       break;
   }
@@ -599,9 +635,17 @@ void loadAllPages(void)
   (void)load_range(EEPROM_CONFIG15_START, (byte *)&configPage15, (byte *)&configPage15+sizeof(configPage15));  
 
   //*********************************************************************************************************************************************************************************
-  // The long-term trim block is NOT loaded here. It lives above 0x1000, carries its own
-  // magic/version/CRC header, and has to be able to refuse to load when the storage backend
-  // is too small to contain it. lttInit() owns that decision - see ltt.cpp.
+  // NOT loaded here: pages 16, 17, 18 and 19.
+  //
+  // All four live above 0x1000 and carry their own magic/version/CRC header. The whole point of
+  // that header is to decide whether the block is safe to apply, and that decision cannot be made
+  // by a blind load_range() - it belongs to lttInit(), initialiseRaceTime() and
+  // initialisePpLaunch() respectively, each of which validates before applying and falls back to
+  // defaults otherwise. Loading them here as well would apply an unvalidated launch curve (i.e.
+  // unvalidated ignition retard and a rev limit) or unvalidated trim authority *before* the CRC
+  // had been checked.
+  //
+  // See the identical note at the end of this function about the long-term trim block.
 }
 
 void loadAllCalibrationTables(void)

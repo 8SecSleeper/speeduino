@@ -387,6 +387,20 @@ byte getTSLogEntry(uint16_t byteNum)
     case 142: statusValue = currentStatus.raceTimeState; break;          //RaceTimeState
     case 143: statusValue = currentStatus.raceTimeStatus; break;
     case 144: statusValue = currentStatus.systemTemp; break;
+    // Perfect-pass launch control (pages 18/19). Same numbering rule as above: a U16/S16 channel
+    // starting at index N occupies N and N+1, so the NEXT free index is N+2 and N must appear in
+    // fsIntIndex while N+1 must not.
+    case 145: statusValue = lowByte(currentStatus.ppLaunchAxis); break;
+    case 146: statusValue = highByte(currentStatus.ppLaunchAxis); break;
+    case 147: statusValue = lowByte((uint16_t)currentStatus.ppLaunchSlip); break;
+    case 148: statusValue = highByte((uint16_t)currentStatus.ppLaunchSlip); break;
+    case 149: statusValue = lowByte(currentStatus.ppLaunchLimit); break;
+    case 150: statusValue = highByte(currentStatus.ppLaunchLimit); break;
+    case 151: statusValue = lowByte(currentStatus.ppLaunchBoostTarget); break;
+    case 152: statusValue = highByte(currentStatus.ppLaunchBoostTarget); break;
+    case 153: statusValue = currentStatus.ppLaunchRetard; break;
+    case 154: statusValue = currentStatus.ppLaunchState; break;
+    case 155: statusValue = currentStatus.ppLaunchStatus; break;
     default: statusValue = 0; // MISRA check
   }
 
@@ -733,7 +747,7 @@ bool is2ByteEntry(uint8_t key)
   // This array indicates which index values from the log are 2 byte values
   // This array MUST remain in ascending order
   // !!!! WARNING: If any value above 255 is required in this array, changes MUST be made to is2ByteEntry() function !!!!
-  static constexpr byte PROGMEM fsIntIndex[] = {4, 14, 17, 22, 26, 28, 33, 42, 44, 46, 48, 50, 52, 54, 56, 58, 60, 62, 64, 66, 68, 70, 72, 76, 78, 80, 82, 86, 88, 90, 93, 95, 99, 104, 111, 121, 125, 130, 132, 134, 136, 138, 140 };
+  static constexpr byte PROGMEM fsIntIndex[] = {4, 14, 17, 22, 26, 28, 33, 42, 44, 46, 48, 50, 52, 54, 56, 58, 60, 62, 64, 66, 68, 70, 72, 76, 78, 80, 82, 86, 88, 90, 93, 95, 99, 104, 111, 121, 125, 130, 132, 134, 136, 138, 140, 145, 147, 149, 151 };
 
   unsigned int bot = 0U;
   unsigned int mid = _countof(fsIntIndex);

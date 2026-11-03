@@ -26,8 +26,11 @@ constexpr uint8_t ignMap2Page   = 14;
 constexpr uint8_t boostvvtPage2 = 15;
 constexpr uint8_t lttPage       = 16; ///< Long-term trims, EGO/trim authority and learn settings
 constexpr uint8_t raceTimePage  = 17; ///< FND-05: race-time framework and the retard-vs-time curve
+constexpr uint8_t ppLaunchPage  = 18; ///< Launch control, speed-based reference-trajectory controller
+constexpr uint8_t ppLaunchRpmPage = 19; ///< Launch control, simple RPM limiter (time vs RPM)
+constexpr uint8_t boostLaunchPage = 20; ///< Launch boost target vs time (lives in the Boost menu)
 constexpr uint8_t MIN_PAGE_NUM  = veSetPage;
-constexpr uint8_t MAX_PAGE_NUM  = (raceTimePage+1U);
+constexpr uint8_t MAX_PAGE_NUM  = (boostLaunchPage+1U);
 
 /** @name Calibration page numbers */
 ///@{

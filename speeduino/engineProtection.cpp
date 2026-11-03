@@ -8,6 +8,7 @@
 #include "decoder_init.h"
 #include "units.h"
 #include "preprocessor.h"
+#include "ppLaunch.h"
 
 TESTABLE_STATIC uint32_t oilProtEndTime;
 TESTABLE_STATIC bool oilProtTimerStarted = false;
@@ -244,17 +245,35 @@ TESTABLE_INLINE_STATIC uint16_t applyFlatShiftRevLimit(uint16_t curLimit, const 
   return curLimit;
 }
 
+/**
+ * @brief Apply the perfect-pass launch limiter (pages 18/19), if it is engaged.
+ *
+ * This is deliberately a separate step in the chain rather than a replacement for
+ * applyHardLaunchRevLimit(): the classic 2-step on page 6 and this reference-curve limiter are
+ * independent features, and a car running both must get the lower of the two. `ppLaunchRpmLimit()`
+ * already returns UINT16_MAX when its limiter is not engaged, so the `min` is a no-op then.
+ *
+ * `min(curLimit, UINT16_MAX)` is used rather than a branch because the chain works in whole RPM
+ * here while the page-6 path works in RPM/100; keeping both as `min` means the eventual result is
+ * the same regardless of which ones are active.
+ */
+TESTABLE_INLINE_STATIC uint16_t applyPpLaunchRevLimit(uint16_t curLimit)
+{
+  return (std::min)(curLimit, ppLaunchRpmLimit());
+}
+
 TESTABLE_INLINE_STATIC uint16_t getMaxRpm(const statuses &current, const config4 &page4, const config6 &page6, const config9 &page9)
 {
-  // The maximum RPM allowed by all the potential limiters (Engine protection, 2-step, flat shift etc).
-  // Divided by 100.
-  return applyFlatShiftRevLimit(
-          RPM_COARSE.toUser(applyHardLaunchRevLimit(
-                              applyEngineProtectionRevLimit(
-                                getHardRevLimit(current, page4, page9), 
-                                current, page4),
-                              current, page6)),
-            current);
+  // The maximum RPM allowed by all the potential limiters (Engine protection, 2-step, flat shift,
+  // perfect-pass launch). Divided by 100 on the way in, whole RPM on the way out.
+  return applyPpLaunchRevLimit(
+           applyFlatShiftRevLimit(
+             RPM_COARSE.toUser(applyHardLaunchRevLimit(
+                                 applyEngineProtectionRevLimit(
+                                   getHardRevLimit(current, page4, page9), 
+                                   current, page4),
+                                 current, page6)),
+             current));
   
 }
 
@@ -288,6 +307,34 @@ constexpr statuses::scheduler_cut_t CUT_NONE = {
   .status = SchedulerCutStatus::None 
 };
 
+/**
+ * @brief Apply a full cut using the perfect-pass launch limiter's own cut type.
+ *
+ * The per-page `limitMethod` (spark / fuel / both / rolling) exists because a launch limiter and
+ * the general engine-protection limiter want different things: a launch limiter is usually a
+ * spark cut because it is gentler on the exhaust and keeps the turbo spooling, while engine
+ * protection usually cuts both. Sharing `page6.engineProtectType` would force a tuner to pick one
+ * compromise for two unrelated jobs.
+ *
+ * `PP_LIMIT_ROLLING` is handled by the caller, which routes it through the rolling-cut machinery;
+ * if it reaches here it is treated as a spark cut, which is what "rolling" degenerates to at 100%.
+ */
+static inline statuses::scheduler_cut_t applyPpLaunchFullCut(void)
+{
+  switch (ppLaunchLimitMethod())
+  {
+    case PP_LIMIT_FUEL:
+      return CUT_FULL_FUEL;
+    case PP_LIMIT_BOTH:
+      return CUT_FULL_BOTH;
+    case PP_LIMIT_SPARK:
+    case PP_LIMIT_ROLLING:
+    case PP_LIMIT_NONE:
+    default:
+      return CUT_FULL_IGN;
+  }
+}
+
 static inline statuses::scheduler_cut_t applyFullCut(const config6 &page6)
 {
   //Full hard cut turns outputs off completely. 
@@ -315,6 +362,21 @@ static inline statuses::scheduler_cut_t applyFullCut(const config6 &page6)
  *                               | rolling cut window |
  */
 TESTABLE_CONSTEXPR table2D_i8_u8_4 rollingCutTable(&configPage15.rollingProtRPMDelta, &configPage15.rollingProtCutPercent);
+
+/**
+ * @brief True if the perfect-pass launch limiter should use a rolling cut right now.
+ *
+ * Rolling cut is the right default for a launch: a full spark cut at the limiter kills the
+ * exhaust energy the turbo needs and produces a hard bang, whereas a probabilistic cut keeps some
+ * cylinders firing and holds the RPM much more smoothly. It is a per-launch choice, so it does not
+ * depend on `page2.hardCutType`.
+ */
+TESTABLE_INLINE_STATIC bool usePpLaunchRollingCut(const statuses &current, uint16_t maxAllowedRPM)
+{
+  return ppLaunchIsLimiting()
+      && (ppLaunchLimitMethod() == PP_LIMIT_ROLLING)
+      && (current.RPM < maxAllowedRPM);
+}
 
 TESTABLE_INLINE_STATIC bool useRollingCut(const statuses &current, const config2 &page2, uint16_t maxAllowedRPM)
 {
@@ -482,9 +544,13 @@ BEGIN_LTO_ALWAYS_INLINE(statuses::scheduler_cut_t) calculateFuelIgnitionChannelC
     // regardless of page2.hardCutType
     if (current.RPM >= maxAllowedRPM)
     {
-        cutState = applyFullCut(page6);
+        // The launch limiter has its own cut type, so a car that hits the launch limit gets the
+        // cut the tuner picked for launching rather than the one picked for engine protection.
+        // When the launch limiter is not the binding limit this is equivalent, because
+        // maxAllowedRPM came from a different limiter and ppLaunchIsLimiting() is false.
+        cutState = ppLaunchIsLimiting() ? applyPpLaunchFullCut() : applyFullCut(page6);
     }
-    else if (useRollingCut(current, page2, maxAllowedRPM))
+    else if (useRollingCut(current, page2, maxAllowedRPM) || usePpLaunchRollingCut(current, maxAllowedRPM))
     { 
         cutState = applyRollingCut(current, page2, page4, page6, maxAllowedRPM);
     }

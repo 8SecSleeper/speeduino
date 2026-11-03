@@ -417,6 +417,19 @@ struct statuses {
   /** @brief FND-09: the retard the arbiter actually applied, whole degrees. */
   uint8_t torqueRetardActive;
 
+  /// @name Perfect-pass launch control (pages 18/19), published for logging
+  /// @{
+  /// These are snapshots of what the module actually applied, not what it was asked for. A tuner
+  /// debugging a launch needs to see the number that reached the engine.
+  uint16_t ppLaunchAxis;        ///< Conditioned axis value, in the configured unit
+  int16_t ppLaunchSlip;         ///< Deviation from the reference wire, axis units
+  uint16_t ppLaunchLimit;       ///< RPM limit in force, whole RPM. 0 when not limiting
+  uint16_t ppLaunchBoostTarget; ///< Boost target request, kPa. 0 = no override
+  uint8_t ppLaunchRetard;       ///< Retard applied, whole degrees
+  uint8_t ppLaunchState;        ///< @ref PpState
+  uint8_t ppLaunchStatus;       ///< bit0 limiting, bit1 boost trim active, bits2-4 win. producer
+  /// @}
+
   uint8_t maxIgnOutputs; /**< Number of ignition outputs being used by the current tune configuration */
   uint8_t injLayout : 3; ///< Normally the same value as config2::injLayout, but under some situations will change to one of the other INJ_* constants
   num_injector_t injOutputs;

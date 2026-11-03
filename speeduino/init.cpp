@@ -6,6 +6,8 @@
 #include "storage.h"
 #include "ltt.h"
 #include "raceTime.h"
+#include "ppLaunch.h"
+#include "boostLaunch.h"
 #include "updates.h"
 #include "timers.h"
 #include "comms.h"
@@ -235,6 +237,13 @@ void initialiseAll(void)
     initialiseProgrammableIO(configPage13);
     initialiseFlexSensor(configPage2, currentStatus, pinNumbers.pinFlex);
     initialiseLaunchControl(currentStatus, configPage6, pinNumbers);
+    // Perfect-pass launch control (pages 18/19). Separate from the classic 2-step above on
+    // purpose: that one holds an RPM until the clutch is released, this one tracks a reference
+    // trajectory. They are independent features and can both be enabled.
+    initialisePpLaunch(currentStatus);
+    // The launch boost target curve lives in the Boost menu with its own block and CRC header.
+    // Initialised after the launch module because it reads the launch state machine.
+    initialiseBoostLaunch();
     initialiseIgnBypass(currentStatus, configPage4, pinNumbers);
 #if defined(CORE_TEENSY) && defined(USE_SPI_EEPROM)
     boardBootTrace(0x43); // aux controllers initialised
