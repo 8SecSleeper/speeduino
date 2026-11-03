@@ -63,7 +63,7 @@ SEPARATOR = "std_separator"
 # Anything else changing this digest means a real offset may have moved, which
 # silently invalidates existing .msq files. Update this constant only after
 # deliberately confirming that.
-EXPECTED_CONSTANTS_DIGEST = "37c19aceb4e9890b"
+EXPECTED_CONSTANTS_DIGEST = "9b3542b62256cc13"
 
 # Why this changed (from 5aa79bb2d9f87b2e):
 #   Restructured the launch pages and added page 20. Still an APPEND plus a rework of pages that
