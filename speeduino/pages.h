@@ -29,8 +29,9 @@ constexpr uint8_t raceTimePage  = 17; ///< FND-05: race-time framework and the r
 constexpr uint8_t ppLaunchPage  = 18; ///< Launch control, speed-based reference-trajectory controller
 constexpr uint8_t ppLaunchRpmPage = 19; ///< Launch control, simple RPM limiter (time vs RPM)
 constexpr uint8_t boostLaunchPage = 20; ///< Launch boost target vs time (lives in the Boost menu)
+constexpr uint8_t ppLaunchReactPage = 21; ///< Launch control reactions (sustained hard-limit time)
 constexpr uint8_t MIN_PAGE_NUM  = veSetPage;
-constexpr uint8_t MAX_PAGE_NUM  = (boostLaunchPage+1U);
+constexpr uint8_t MAX_PAGE_NUM  = (ppLaunchReactPage+1U);
 
 /** @name Calibration page numbers */
 ///@{

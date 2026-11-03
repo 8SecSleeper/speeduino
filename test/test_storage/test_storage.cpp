@@ -65,7 +65,8 @@ static void test_loadAllPages(void)
         // with their own magic/version/CRC headers, and initialisePpLaunch() (see
         // speeduino/ppLaunch.cpp) is what decides whether to load them. Loading them here would
         // apply an unvalidated launch curve - i.e. unvalidated ignition retard and a rev limit.
-        if ((page==ppLaunchPage) || (page==ppLaunchRpmPage) || (page==boostLaunchPage)) {
+        if ((page==ppLaunchPage) || (page==ppLaunchRpmPage) || (page==boostLaunchPage)
+            || (page==ppLaunchReactPage)) {
             continue;
         }
         assert_page(page, BUFFER_MARKER);

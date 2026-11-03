@@ -319,20 +319,25 @@ constexpr statuses::scheduler_cut_t CUT_NONE = {
  * `PP_LIMIT_ROLLING` is handled by the caller, which routes it through the rolling-cut machinery;
  * if it reaches here it is treated as a spark cut, which is what "rolling" degenerates to at 100%.
  */
+/** @brief Apply a full cut using the launch limiter's own strategy bits.
+ *
+ * The strategy is a BITMASK, not an enum, because the actions combine: a tuner may want a fuel
+ * cut and a spark cut together, and boost reduction is independent of both. This maps the two cut
+ * bits onto the channel-cut machinery and ignores the boost bit, which the boost controller
+ * handles for itself.
+ */
 static inline statuses::scheduler_cut_t applyPpLaunchFullCut(void)
 {
-  switch (ppLaunchLimitMethod())
-  {
-    case PP_LIMIT_FUEL:
-      return CUT_FULL_FUEL;
-    case PP_LIMIT_BOTH:
-      return CUT_FULL_BOTH;
-    case PP_LIMIT_SPARK:
-    case PP_LIMIT_ROLLING:
-    case PP_LIMIT_NONE:
-    default:
-      return CUT_FULL_IGN;
-  }
+  const uint8_t strategy = ppLaunchStrategy();
+  const bool fuel = (strategy & PP_STRAT_FUEL_CUT) != 0U;
+  const bool spark = (strategy & PP_STRAT_SPARK_CUT) != 0U;
+
+  if (fuel && spark) { return CUT_FULL_BOTH; }
+  if (fuel) { return CUT_FULL_FUEL; }
+  if (spark) { return CUT_FULL_IGN; }
+  // Neither cut selected (e.g. boost reduction only): cut nothing. The limit is still reported so
+  // the strategy can act elsewhere, but there is no channel cut to make.
+  return CUT_NONE;
 }
 
 static inline statuses::scheduler_cut_t applyFullCut(const config6 &page6)
@@ -373,8 +378,12 @@ TESTABLE_CONSTEXPR table2D_i8_u8_4 rollingCutTable(&configPage15.rollingProtRPMD
  */
 TESTABLE_INLINE_STATIC bool usePpLaunchRollingCut(const statuses &current, uint16_t maxAllowedRPM)
 {
+  // Rolling cut is requested by the ROLLING bit AND at least one cut bit; on its own it means
+  // nothing, because there is no channel to roll-cut.
+  const uint8_t strategy = ppLaunchStrategy();
   return ppLaunchIsLimiting()
-      && (ppLaunchLimitMethod() == PP_LIMIT_ROLLING)
+      && ((strategy & PP_STRAT_ROLLING) != 0U)
+      && ((strategy & (PP_STRAT_FUEL_CUT | PP_STRAT_SPARK_CUT)) != 0U)
       && (current.RPM < maxAllowedRPM);
 }
 

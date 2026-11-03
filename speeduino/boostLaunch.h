@@ -56,7 +56,7 @@
 // =====================================================================================
 
 /** @brief Base address of the launch-boost block. Immediately after the two launch blocks. */
-constexpr uint16_t EEPROM_BOOSTLAUNCH_BASE = 0x1D50;
+constexpr uint16_t EEPROM_BOOSTLAUNCH_BASE = 0x1F60;
 
 /** @brief 'BLCH'. Detects "never initialised" against "corrupt". */
 constexpr uint32_t EEPROM_BOOSTLAUNCH_MAGIC = 0x424C4348;
@@ -180,7 +180,7 @@ static_assert(sizeof(boostLaunchConfig) == BOOSTLAUNCH_PAYLOAD_SIZE,
 
 // Block placement: inside the 23,808-byte emulated EEPROM (0x0000..0x5CFF), above the frozen
 // 0x0000-0x0FFF core tune ABI, clear of LTT (0x1000..0x181F), race time (0x1820..0x192F) and the
-// two launch blocks (0x1930..0x1D4F).
+// three launch blocks (0x1930..0x1F5F).
 static_assert(EEPROM_BOOSTLAUNCH_BASE >= (0x1930U + 2U * 528U),   // = 0x1D50
               "Launch-boost block must start after both launch blocks");
 static_assert(((uint32_t)EEPROM_BOOSTLAUNCH_BASE + (uint32_t)BOOSTLAUNCH_BLOCK_SIZE) <= 0x5D00U,

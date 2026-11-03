@@ -157,6 +157,11 @@ static uint16_t getBoostTarget(const statuses &current, const config2 &page2, co
   //
   // flexBoostCorrection is int16_t; beware of conversion under-/over-flow
   int16_t correctedTarget = (int16_t)target + current.flexBoostCorrection;
+
+  // The launch reactions table may also trim the TARGET, in kPa. Applied here, after flex, so it
+  // composes with every other target modifier rather than replacing them.
+  correctedTarget = (int16_t)(correctedTarget + ppLaunchBoostTargetAdj());
+
   return clamp(correctedTarget, (int16_t)0, (int16_t)511);
 }
 
@@ -279,13 +284,41 @@ TESTABLE_STATIC void boostControlCore(statuses &current, const config2 &page2, c
   // Two sources, combined as the LARGEST rather than the sum - the same arbitration rule the
   // torque bus uses, and for the same reason: two systems each asking for 30% off do not mean
   // 60% off, and summing is how you end up with a solenoid commanded to nothing.
+  // Sources, combined as the LARGEST magnitude rather than the sum - two systems each asking for
+  // 30% off do not mean 60% off, and summing is how you end up with a solenoid commanded to
+  // nothing. The reactions table is signed (it can add duty as well as remove it), so it is
+  // handled separately below rather than being folded into the 0..100 trim.
   uint8_t trimPercent = boostLaunchDutyTrim();
-  const uint8_t launchTrim = ppLaunchBoostTrim();
-  if (launchTrim > trimPercent) { trimPercent = launchTrim; }
+
+  // A launch limit strategy that includes "reduce boost" banks a fixed reduction for as long as
+  // the limit is engaged. The strategy is what the tuner selected; the reactions table is how
+  // much, which is why the table can override it with something larger.
+  if (ppLaunchIsLimiting() && ((ppLaunchStrategy() & PP_STRAT_BOOST_REDUCE) != 0U))
+  {
+    // 20% is the default magnitude: enough to be felt at the top of a launch without making the
+    // car feel like it shut off. A tuner who wants more uses the reactions table.
+    constexpr uint8_t kStrategyTrim = 20U;
+    if (kStrategyTrim > trimPercent) { trimPercent = kStrategyTrim; }
+  }
+
+  // The reactions table's signed adjustment. Applied as a separate step because it can go either
+  // way: a negative adjustment trims duty in the same manner as trimPercent, a positive one adds.
+  const int16_t reactionAdj = ppLaunchBoostDutyAdj();
 
   if ((trimPercent > 0U) && (current.boostDuty > 0U))
   {
     current.boostDuty = (uint16_t)(((uint32_t)current.boostDuty * (100U - trimPercent)) / 100U);
+  }
+
+  // Signed reaction adjustment, applied last and clamped to the legal duty range so a large
+  // positive adjustment cannot push duty past 100%.
+  if (reactionAdj != 0)
+  {
+    int32_t adjusted = (int32_t)current.boostDuty
+                     + ((int32_t)current.boostDuty * reactionAdj / 100);
+    if (adjusted < 0) { adjusted = 0; }
+    if (adjusted > (int32_t)percentToDuty(100U)) { adjusted = (int32_t)percentToDuty(100U); }
+    current.boostDuty = (uint16_t)adjusted;
   }
 
   applyDutyToPwm(current);

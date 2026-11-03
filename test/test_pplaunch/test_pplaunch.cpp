@@ -64,53 +64,47 @@ struct Fixture
     memset(&current, 0, sizeof(current));
     memset(&page2, 0, sizeof(page2));
     ppLaunchResetForTest();
-    boostLaunchResetForTest();
     torqueBusResetForTest();
 
-    // The speed module refuses to run a speed axis on a tune with no VSS input at all, because a
-    // zero axis would hold the limiter and the retard on for the whole pass with no indication
-    // why. Most tests want a configured car.
     page2.vssMode = VSS_MODE_EXTERNAL_KM;
     ppLaunchSetAxisForTest(0);
 
-    // ---- speed page, enabled and simplified for deterministic maths --------------------
+    // Speed page: enabled, deterministic. Axis in tenths of a mph.
     ppLaunchSpeedBlock &s = ppLaunchGetSpeedPageMutable();
     s.enable = PP_ENABLED;
-    s.armPin = 0;          // unbound: the arm level comes from the test injection point
-    s.armPolarity = 0;     // asserted HIGH
+    s.armPin = 0;
+    s.armPolarity = 0;
     s.axisSource = PP_AXIS_VSS_MPH10;
-    s.curveMode = PP_CURVE_TIME;
-    s.limitMethod = PP_LIMIT_SPARK;
-    s.featureFlags = (uint8_t)(PP_FLAG_PERFECT_PASS | PP_FLAG_SLIP_CORRECT | PP_FLAG_DUTY_TRIM);
+    s.curveMode = PP_CURVE_BY_AXIS;
+    s.limiterStrategy = (uint8_t)(PP_STRAT_FUEL_CUT | PP_STRAT_SPARK_CUT);
+    s.featureFlags = (uint8_t)(PP_FLAG_PERFECT_PASS);
     s.timeoutMs = 0;
     s.startBelowAxis = 0;
     s.rearmBelowAxis = 0;
-    s.slipDeadband = 0;
-    s.axisFilterShift = 0;   // raw axis: the tests want the number they injected
+    s.softZonePercent = 0;
+    s.axisFilterShift = 0;
     s.axisAccelLimit = 0xFFFFU;
-    s.retardSlewTenths = 0;  // no slew unless a test asks for it
+    s.retardSlewMsPerDeg = 0;
 
-    // ---- rpm page, disabled by default so the speed page is the active mode ------------
+    // RPM page off so the speed page is what the tests read by default.
     ppLaunchGetRpmPageMutable().enable = PP_DISABLED;
+    ppLaunchGetReactPageMutable().enable = PP_DISABLED;
   }
 
-  /** @brief Drive the 1 kHz tick for a number of milliseconds. */
   void tick(uint32_t ms = 1U)
   {
     for (uint32_t i = 0U; i < ms; ++i) { ppLaunchTick1ms(current); }
   }
 
-  /** @brief Arm the module and release, i.e. start a pass. */
   void launch(uint16_t axisStart = 0U)
   {
     ppLaunchSetAxisForTest(axisStart);
     ppLaunchSetArmForTest(true);
     tick(2U);
     ppLaunchSetArmForTest(false);
-    tick(1U);            // release edge: the clock starts here
+    tick(1U);
   }
 
-  /** @brief Advance the clock and evaluate, with a fixed axis. */
   void run(uint32_t ms, uint16_t axis)
   {
     ppLaunchSetAxisForTest(axis);
@@ -120,181 +114,224 @@ struct Fixture
       ppLaunchUpdate(current, page2);
     }
   }
-
-  /** @brief Advance the clock and evaluate with a fixed engine RPM (for the RPM mode). */
-  void runRpm(uint32_t ms, uint16_t rpm)
-  {
-    current.RPM = rpm;
-    for (uint32_t i = 0U; i < ms; ++i)
-    {
-      ppLaunchTick1ms(current);
-      ppLaunchUpdate(current, page2);
-      boostLaunchUpdate(current);
-    }
-  }
 };
 
 // =====================================================================================
 // Layout contract - the tuning-file ABI
 // =====================================================================================
 
-void test_both_launch_pages_are_whole_tunerstudio_pages(void)
+void test_all_three_pages_are_whole_tunerstudio_pages(void)
 {
   TEST_ASSERT_EQUAL_UINT16(512, sizeof(ppLaunchSpeedConfig));
   TEST_ASSERT_EQUAL_UINT16(512, sizeof(ppLaunchRpmConfig));
+  TEST_ASSERT_EQUAL_UINT16(512, sizeof(ppLaunchReactConfig));
   TEST_ASSERT_EQUAL_UINT16(512, PPLAUNCH_PAYLOAD_SIZE);
 }
 
-void test_boost_page_is_a_kilobyte_with_room_to_grow(void)
+void test_the_table_is_one_axis_and_two_tied_rows(void)
 {
-  // Deliberately twice a normal page: this is where the full boost control feature set goes.
-  TEST_ASSERT_EQUAL_UINT16(1024, sizeof(boostLaunchConfig));
-  TEST_ASSERT_EQUAL_UINT16(1024, BOOSTLAUNCH_PAYLOAD_SIZE);
-  // At least half the payload must still be reserved, or the "room to grow" claim is a lie.
-  const uint16_t used = offsetof(boostLaunchConfig, reserved03);
-  TEST_ASSERT_TRUE_MESSAGE(used <= (BOOSTLAUNCH_PAYLOAD_SIZE / 2U),
-                           "the boost page must keep at least half its payload reserved");
+  // The structural decision this whole page exists for: ONE 32-point X axis, with the two rows
+  // laid directly after it so they share it. Three independently-axised curves cannot be read as
+  // a table, which is what an earlier draft got wrong.
+  TEST_ASSERT_EQUAL_UINT16(offsetof(ppLaunchSpeedConfig, axisSpeed) + (2U * PP_CURVE_POINTS),
+                           offsetof(ppLaunchSpeedConfig, rowRetard));
+  TEST_ASSERT_EQUAL_UINT16(offsetof(ppLaunchSpeedConfig, rowRetard) + (2U * PP_CURVE_POINTS),
+                           offsetof(ppLaunchSpeedConfig, rowTimeMs));
+  TEST_ASSERT_EQUAL_UINT16(offsetof(ppLaunchRpmConfig, axisValue) + (2U * PP_CURVE_POINTS),
+                           offsetof(ppLaunchRpmConfig, rowRetard));
+  TEST_ASSERT_EQUAL_UINT16(offsetof(ppLaunchRpmConfig, rowRetard) + (2U * PP_CURVE_POINTS),
+                           offsetof(ppLaunchRpmConfig, rowTimeMs));
+}
+
+void test_there_is_no_second_rpm_or_retard_vs_time_table(void)
+{
+  // Retard vs race time already exists on page 17, and the RPM page owns the RPM limit. A copy of
+  // either here would be a second thing to keep in step.
+  TEST_ASSERT_EQUAL_UINT16(512, sizeof(ppLaunchSpeedConfig));
+  // The speed page's table region is exactly three 32-point tables; everything past rowTimeMs is
+  // reserved, so there is no room for a fourth table by accident.
+  const uint16_t tableEnd = offsetof(ppLaunchSpeedConfig, rowTimeMs) + (2U * PP_CURVE_POINTS);
+  TEST_ASSERT_EQUAL_UINT16(offsetof(ppLaunchSpeedConfig, reserved1), tableEnd);
 }
 
 void test_speed_page_offsets_match_the_ini(void)
 {
-  TEST_ASSERT_EQUAL_UINT16(INI_SPEED_ENABLE, offsetof(ppLaunchSpeedConfig, enable));
-  TEST_ASSERT_EQUAL_UINT16(INI_SPEED_AXIS_SOURCE, offsetof(ppLaunchSpeedConfig, axisSource));
-  TEST_ASSERT_EQUAL_UINT16(INI_SPEED_TIMEOUT, offsetof(ppLaunchSpeedConfig, timeoutMs));
-  TEST_ASSERT_EQUAL_UINT16(INI_SPEED_LABEL, offsetof(ppLaunchSpeedConfig, label));
-  TEST_ASSERT_EQUAL_UINT16(INI_SPEED_CURVE_TIME, offsetof(ppLaunchSpeedConfig, curveTime));
-  TEST_ASSERT_EQUAL_UINT16(INI_SPEED_CURVE_AXIS, offsetof(ppLaunchSpeedConfig, curveAxis));
-  TEST_ASSERT_EQUAL_UINT16(INI_SPEED_CURVE_RETARD, offsetof(ppLaunchSpeedConfig, curveRetard));
-  TEST_ASSERT_EQUAL_UINT16(INI_SPEED_CURVE_LIMIT, offsetof(ppLaunchSpeedConfig, curveLimit));
-  TEST_ASSERT_EQUAL_UINT16(INI_SPEED_CURVE_TRIM, offsetof(ppLaunchSpeedConfig, curveBoostTrim));
-  TEST_ASSERT_EQUAL_UINT16(INI_SPEED_SLIP_BIN, offsetof(ppLaunchSpeedConfig, slipBin));
-  TEST_ASSERT_EQUAL_UINT16(INI_SPEED_SLIP_RETARD, offsetof(ppLaunchSpeedConfig, slipRetard));
-  TEST_ASSERT_EQUAL_UINT16(INI_SPEED_SLIP_TRIM, offsetof(ppLaunchSpeedConfig, slipBoostTrim));
+  TEST_ASSERT_EQUAL_UINT16(0, offsetof(ppLaunchSpeedConfig, enable));
+  TEST_ASSERT_EQUAL_UINT16(5, offsetof(ppLaunchSpeedConfig, limiterStrategy));
+  TEST_ASSERT_EQUAL_UINT16(14, offsetof(ppLaunchSpeedConfig, softZonePercent));
+  TEST_ASSERT_EQUAL_UINT16(24, offsetof(ppLaunchSpeedConfig, label));
+  TEST_ASSERT_EQUAL_UINT16(48, offsetof(ppLaunchSpeedConfig, axisSpeed));
+  TEST_ASSERT_EQUAL_UINT16(112, offsetof(ppLaunchSpeedConfig, rowRetard));
+  TEST_ASSERT_EQUAL_UINT16(176, offsetof(ppLaunchSpeedConfig, rowTimeMs));
 }
 
 void test_rpm_page_offsets_match_the_ini(void)
 {
-  TEST_ASSERT_EQUAL_UINT16(INI_RPM_ENABLE, offsetof(ppLaunchRpmConfig, enable));
-  TEST_ASSERT_EQUAL_UINT16(INI_RPM_CUT_METHOD, offsetof(ppLaunchRpmConfig, cutMethod));
-  TEST_ASSERT_EQUAL_UINT16(INI_RPM_TIMEOUT, offsetof(ppLaunchRpmConfig, timeoutMs));
-  TEST_ASSERT_EQUAL_UINT16(INI_RPM_SOFT_ZONE, offsetof(ppLaunchRpmConfig, softZoneRpm));
-  TEST_ASSERT_EQUAL_UINT16(INI_RPM_SOFT_HYST, offsetof(ppLaunchRpmConfig, softHystRpm));
-  TEST_ASSERT_EQUAL_UINT16(INI_RPM_SOFT_RETARD, offsetof(ppLaunchRpmConfig, softRetardTenths));
-  TEST_ASSERT_EQUAL_UINT16(INI_RPM_LABEL, offsetof(ppLaunchRpmConfig, label));
-  TEST_ASSERT_EQUAL_UINT16(INI_RPM_CURVE_TIME, offsetof(ppLaunchRpmConfig, curveTime));
-  TEST_ASSERT_EQUAL_UINT16(INI_RPM_CURVE_LIMIT, offsetof(ppLaunchRpmConfig, curveLimit));
+  TEST_ASSERT_EQUAL_UINT16(0, offsetof(ppLaunchRpmConfig, enable));
+  TEST_ASSERT_EQUAL_UINT16(4, offsetof(ppLaunchRpmConfig, limiterStrategy));
+  TEST_ASSERT_EQUAL_UINT16(8, offsetof(ppLaunchRpmConfig, softZonePercent));
+  TEST_ASSERT_EQUAL_UINT16(10, offsetof(ppLaunchRpmConfig, label));
+  TEST_ASSERT_EQUAL_UINT16(32, offsetof(ppLaunchRpmConfig, axisValue));
+  TEST_ASSERT_EQUAL_UINT16(96, offsetof(ppLaunchRpmConfig, rowRetard));
+  TEST_ASSERT_EQUAL_UINT16(160, offsetof(ppLaunchRpmConfig, rowTimeMs));
 }
 
-void test_boost_page_offsets_match_the_ini(void)
+void test_reactions_page_offsets_match_the_ini(void)
 {
-  TEST_ASSERT_EQUAL_UINT16(INI_BL_ENABLE, offsetof(boostLaunchConfig, enable));
-  TEST_ASSERT_EQUAL_UINT16(INI_BL_LABEL, offsetof(boostLaunchConfig, label));
-  TEST_ASSERT_EQUAL_UINT16(INI_BL_CURVE_TIME, offsetof(boostLaunchConfig, curveTime));
-  TEST_ASSERT_EQUAL_UINT16(INI_BL_CURVE_TARGET, offsetof(boostLaunchConfig, curveTarget));
-  TEST_ASSERT_EQUAL_UINT16(INI_BL_CURVE_TRIM, offsetof(boostLaunchConfig, curveDutyTrim));
-}
-
-void test_the_rpm_page_is_simple_on_purpose(void)
-{
-  // It must NOT have grown a reference wire, a slip curve or a boost table - that would be the
-  // "full secondary setup" this page exists to avoid needing.
-  TEST_ASSERT_EQUAL_UINT16(512, sizeof(ppLaunchRpmConfig));
-  // The only curves are time and limit, plus a big reserved tail.
-  TEST_ASSERT_EQUAL_UINT16(offsetof(ppLaunchRpmConfig, curveLimit),
-                           offsetof(ppLaunchRpmConfig, curveTime) + (2U * PP_RPM_CURVE_POINTS));
-  TEST_ASSERT_TRUE(offsetof(ppLaunchRpmConfig, reserved3) <= 200U);
+  TEST_ASSERT_EQUAL_UINT16(0, offsetof(ppLaunchReactConfig, enable));
+  TEST_ASSERT_EQUAL_UINT16(32, offsetof(ppLaunchReactConfig, axisTimeMs));
+  TEST_ASSERT_EQUAL_UINT16(44, offsetof(ppLaunchReactConfig, fuelAddPercent));
+  TEST_ASSERT_EQUAL_UINT16(56, offsetof(ppLaunchReactConfig, boostDutyAdj));
+  TEST_ASSERT_EQUAL_UINT16(68, offsetof(ppLaunchReactConfig, boostTargetAdj));
+  TEST_ASSERT_EQUAL_UINT16(80, offsetof(ppLaunchReactConfig, retardAdj));
 }
 
 void test_blocks_do_not_overlap(void)
 {
-  // 0x1000..0x181F LTT, 0x1820..0x192F race time, 0x1930..0x1B3F speed, 0x1B40..0x1C4F rpm,
-  // 0x1D50..0x215F launch boost. A block that overlaps another silently corrupts a tune.
+  // 0x1000 LTT, 0x1820 race time, 0x1930 speed, 0x1B40 rpm, 0x1D50 reactions, 0x1F60 boost.
   TEST_ASSERT_EQUAL_UINT16(EEPROM_PPLAUNCH_SPEED_BASE, 0x1930);
-  TEST_ASSERT_EQUAL_UINT16(EEPROM_PPLAUNCH_RPM_BASE,
-                           EEPROM_PPLAUNCH_SPEED_BASE + PPLAUNCH_BLOCK_SIZE);
-  TEST_ASSERT_TRUE(EEPROM_BOOSTLAUNCH_BASE >=
-                   (EEPROM_PPLAUNCH_RPM_BASE + PPLAUNCH_BLOCK_SIZE));
-  TEST_ASSERT_TRUE((uint32_t)EEPROM_BOOSTLAUNCH_BASE + BOOSTLAUNCH_BLOCK_SIZE <= 0x5D00UL);
+  TEST_ASSERT_EQUAL_UINT16(EEPROM_PPLAUNCH_RPM_BASE, 0x1930 + PPLAUNCH_BLOCK_SIZE);
+  TEST_ASSERT_EQUAL_UINT16(EEPROM_PPLAUNCH_REACT_BASE, 0x1B40 + PPLAUNCH_BLOCK_SIZE);
+  TEST_ASSERT_TRUE((uint32_t)EEPROM_PPLAUNCH_REACT_BASE + PPLAUNCH_BLOCK_SIZE <= 0x5D00UL);
 }
 
 void test_each_block_has_a_distinct_magic(void)
 {
   TEST_ASSERT_NOT_EQUAL(EEPROM_PPLAUNCH_SPEED_MAGIC, EEPROM_PPLAUNCH_RPM_MAGIC);
-  TEST_ASSERT_NOT_EQUAL(EEPROM_PPLAUNCH_SPEED_MAGIC, EEPROM_BOOSTLAUNCH_MAGIC);
-  TEST_ASSERT_NOT_EQUAL(EEPROM_PPLAUNCH_RPM_MAGIC, EEPROM_BOOSTLAUNCH_MAGIC);
+  TEST_ASSERT_NOT_EQUAL(EEPROM_PPLAUNCH_SPEED_MAGIC, EEPROM_PPLAUNCH_REACT_MAGIC);
+  TEST_ASSERT_NOT_EQUAL(EEPROM_PPLAUNCH_RPM_MAGIC, EEPROM_PPLAUNCH_REACT_MAGIC);
 }
 
 // =====================================================================================
 // Defaults
 // =====================================================================================
 
-void test_every_mode_ships_disabled_but_configured(void)
+void test_all_three_ship_disabled(void)
 {
   ppLaunchResetForTest();
-  boostLaunchResetForTest();
-
   TEST_ASSERT_EQUAL_UINT8(PP_DISABLED, ppLaunchGetSpeedPage().enable);
   TEST_ASSERT_EQUAL_UINT8(PP_DISABLED, ppLaunchGetRpmPage().enable);
-  // Boost ships disabled: substituting the boost target on a car that never asked for it is the
-  // worst default available, and boost is what puts rods through blocks.
-  TEST_ASSERT_EQUAL_UINT8(BL_DISABLED, boostLaunchGetPage().enable);
-
-  TEST_ASSERT_EQUAL_STRING("speed", (const char *)ppLaunchGetSpeedPage().label);
-  TEST_ASSERT_EQUAL_STRING("rpm", (const char *)ppLaunchGetRpmPage().label);
+  TEST_ASSERT_EQUAL_UINT8(PP_DISABLED, ppLaunchGetReactPage().enable);
 }
 
-void test_time_axes_ship_strictly_ascending(void)
+void test_speed_axis_ships_strictly_ascending(void)
 {
   ppLaunchResetForTest();
-  boostLaunchResetForTest();
-
   const ppLaunchSpeedBlock &s = ppLaunchGetSpeedPage();
-  const ppLaunchRpmBlock &r = ppLaunchGetRpmPage();
-  const boostLaunchBlock &b = boostLaunchGetPage();
-
-  TEST_ASSERT_EQUAL_UINT16(0, s.curveTime[0]);
-  TEST_ASSERT_EQUAL_UINT16(0, r.curveTime[0]);
-  TEST_ASSERT_EQUAL_UINT16(0, b.curveTime[0]);
-
   for (uint8_t i = 1U; i < PP_CURVE_POINTS; ++i)
   {
-    TEST_ASSERT_GREATER_THAN_UINT16(s.curveTime[i - 1U], s.curveTime[i]);
-    TEST_ASSERT_GREATER_THAN_UINT16(r.curveTime[i - 1U], r.curveTime[i]);
+    TEST_ASSERT_GREATER_THAN_UINT16(s.axisSpeed[i - 1U], s.axisSpeed[i]);
   }
-  for (uint8_t i = 1U; i < BL_CURVE_POINTS; ++i)
-  {
-    TEST_ASSERT_GREATER_THAN_UINT16(b.curveTime[i - 1U], b.curveTime[i]);
-  }
+  TEST_ASSERT_TRUE(s.rowRetard[0] > 0U);      // a real template, not a flat zero
+  TEST_ASSERT_TRUE(s.rowRetard[0] >= s.rowRetard[PP_CURVE_POINTS - 1U]);
 }
 
-void test_rpm_defaults_ramp_rather_than_sit_flat(void)
+void test_reaction_axis_is_the_fixed_six_points(void)
 {
-  // A flat default is what you get when nobody thought about it. The simple limiter's default
-  // should still show a tuner what a launch ramp looks like.
   ppLaunchResetForTest();
-  const ppLaunchRpmBlock &r = ppLaunchGetRpmPage();
-  TEST_ASSERT_TRUE(r.curveLimit[0] < r.curveLimit[PP_RPM_CURVE_POINTS - 1U]);
-  // ...and the soft retard should ship enabled, or the feature's most useful part is invisible.
-  TEST_ASSERT_GREATER_THAN_UINT16(0U, r.softZoneRpm);
-  TEST_ASSERT_GREATER_THAN_UINT16(0U, r.softRetardTenths);
+  const ppLaunchReactBlock &r = ppLaunchGetReactPage();
+  const uint16_t expected[PP_REACTION_POINTS] = { 0U, 100U, 200U, 300U, 400U, 500U };
+  for (uint8_t i = 0U; i < PP_REACTION_POINTS; ++i)
+  {
+    TEST_ASSERT_EQUAL_UINT16(expected[i], r.axisTimeMs[i]);
+    TEST_ASSERT_EQUAL_UINT16(PP_REACTION_TIME_MS[i], r.axisTimeMs[i]);
+  }
 }
 
 // =====================================================================================
-// Speed mode: state machine
+// The linear soft-zone retard - the core behaviour
 // =====================================================================================
 
-void test_arming_does_not_start_the_clock_or_apply_anything(void)
+/** @brief Configure the speed page with a fixed max retard and a known setpoint. */
+/**
+ * @brief Build a linear axis ending at @p setpointAxis, with a flat max-retard row.
+ *
+ * The setpoint IS the last axis value: that is the speed at which the launch window closes and
+ * therefore the hard limit, and the soft zone is measured back from it.
+ */
+void setupSoftZone(Fixture &f, uint16_t maxRetardTenths, uint16_t setpointAxis, uint8_t softPct)
+{
+  ppLaunchSpeedBlock &s = ppLaunchGetSpeedPageMutable();
+  for (uint8_t i = 0U; i < PP_CURVE_POINTS; ++i)
+  {
+    // Linear 0 .. setpointAxis across the 32 points, strictly ascending.
+    s.axisSpeed[i] = (uint16_t)(((uint32_t)setpointAxis * i) / (PP_CURVE_POINTS - 1U));
+    s.rowRetard[i] = maxRetardTenths;
+    s.rowTimeMs[i] = (uint16_t)(i * 100U);
+  }
+  s.axisSpeed[PP_CURVE_POINTS - 1U] = setpointAxis;
+  s.startBelowAxis = 0U;         // no extra gate: the axis top is the window
+  s.softZonePercent = softPct;
+  s.featureFlags = (uint8_t)(s.featureFlags & (uint8_t)(~PP_FLAG_RETARD_SLEW));
+  (void)f;
+}
+
+void test_retard_is_zero_at_or_below_the_soft_limit(void)
 {
   Fixture f;
-  f.tick(5U);
-  TEST_ASSERT_EQUAL_UINT8(PP_STATE_IDLE, ppLaunchState());
+  // Setpoint 1000, 10% band = starts at 900.
+  setupSoftZone(f, 100U, 1000U, 10U);   // 100 tenths = 10.0 deg at the hard limit
 
-  ppLaunchSetArmForTest(true);
-  f.tick(20U);
-  TEST_ASSERT_EQUAL_UINT8(PP_STATE_ARMED, ppLaunchState());
-  TEST_ASSERT_EQUAL_UINT16(UINT16_MAX, ppLaunchRpmLimit());
+  f.launch(0U);
+  f.run(10U, 800U);                     // below the soft limit
+  TEST_ASSERT_EQUAL_UINT8(0, ppLaunchRetard());
+
+  f.run(10U, 900U);                     // exactly at the soft limit
   TEST_ASSERT_EQUAL_UINT8(0, ppLaunchRetard());
 }
+
+void test_retard_ramps_linearly_from_soft_to_hard_limit(void)
+{
+  // THIS is the behaviour the feature exists for. A step change in advance reads as a misfire;
+  // just tripping the soft limit should pull barely anything.
+  Fixture f;
+  setupSoftZone(f, 100U, 1000U, 10U);   // 10.0 deg max, band 900..1000
+
+  f.launch(0U);
+
+  f.run(10U, 950U);                     // halfway through the band
+  TEST_ASSERT_EQUAL_UINT8(5, ppLaunchRetard());   // ~half of 10 deg
+
+  f.run(10U, 1000U);                    // at the hard limit
+  TEST_ASSERT_EQUAL_UINT8(10, ppLaunchRetard());
+}
+
+void test_just_tripping_the_soft_limit_pulls_very_little(void)
+{
+  Fixture f;
+  setupSoftZone(f, 100U, 1000U, 10U);
+
+  f.launch(0U);
+  f.run(10U, 905U);   // 5% into the band
+  // 0.5 deg rounds to 1. The point is that it is nowhere near the full 10.
+  TEST_ASSERT_LESS_THAN_UINT8(3, ppLaunchRetard());
+}
+
+void test_a_wider_soft_zone_starts_pulling_earlier(void)
+{
+  Fixture f;
+  setupSoftZone(f, 100U, 1000U, 50U);   // band starts at 500
+  f.launch(0U);
+  f.run(10U, 700U);                     // mid-band with a 50% zone
+  TEST_ASSERT_GREATER_THAN_UINT8(0, ppLaunchRetard());
+}
+
+void test_the_soft_zone_scales_with_the_setpoint(void)
+{
+  // A percentage rather than an absolute offset is the whole point: 10% of a high setpoint is a
+  // wider band than 10% of a low one, in the same proportion a driver feels.
+  Fixture f;
+  setupSoftZone(f, 100U, 2000U, 10U);   // band starts at 1800
+  f.launch(0U);
+  f.run(10U, 1700U);
+  TEST_ASSERT_EQUAL_UINT8(0, ppLaunchRetard());   // outside the band
+  f.run(10U, 1900U);
+  TEST_ASSERT_GREATER_THAN_UINT8(0, ppLaunchRetard());
+}
+
+// =====================================================================================
+// State machine
+// =====================================================================================
 
 void test_release_edge_starts_the_clock(void)
 {
@@ -302,7 +339,6 @@ void test_release_edge_starts_the_clock(void)
   ppLaunchSetArmForTest(true);
   f.tick(50U);
   TEST_ASSERT_EQUAL_UINT8(PP_STATE_ARMED, ppLaunchState());
-
   ppLaunchSetArmForTest(false);
   f.tick(1U);
   TEST_ASSERT_EQUAL_UINT8(PP_STATE_LAUNCHING, ppLaunchState());
@@ -312,603 +348,216 @@ void test_armed_timeout_prevents_an_indefinitely_armed_car(void)
 {
   Fixture f;
   ppLaunchGetSpeedPageMutable().timeoutMs = 100U;
-
   ppLaunchSetArmForTest(true);
   f.tick(99U);
   TEST_ASSERT_EQUAL_UINT8(PP_STATE_ARMED, ppLaunchState());
   f.tick(2U);
   TEST_ASSERT_EQUAL_UINT8(PP_STATE_TIMEOUT, ppLaunchState());
-  TEST_ASSERT_EQUAL_UINT16(UINT16_MAX, ppLaunchRpmLimit());
 }
 
 void test_disabling_mid_pass_drops_every_output(void)
 {
   Fixture f;
-  f.launch();
-  f.run(100U, 0U);
-  TEST_ASSERT_EQUAL_UINT8(PP_STATE_LAUNCHING, ppLaunchState());
+  setupSoftZone(f, 100U, 1000U, 10U);
+  f.launch(0U);
+  f.run(20U, 1000U);
+  TEST_ASSERT_GREATER_THAN_UINT8(0, ppLaunchRetard());
 
   ppLaunchGetSpeedPageMutable().enable = PP_DISABLED;
-  f.run(1U, 0U);
+  f.run(1U, 1000U);
   TEST_ASSERT_EQUAL_UINT8(PP_STATE_OFF, ppLaunchState());
-  TEST_ASSERT_EQUAL_UINT16(UINT16_MAX, ppLaunchRpmLimit());
   TEST_ASSERT_EQUAL_UINT8(0, ppLaunchRetard());
-}
-
-void test_the_pass_completes_at_the_end_of_the_curve_and_latches(void)
-{
-  Fixture f;
-  const uint16_t lastTime = ppLaunchGetSpeedPage().curveTime[PP_CURVE_POINTS - 1U];
-
-  f.launch();
-  f.run((uint32_t)lastTime - 2U, 0U);
-  TEST_ASSERT_EQUAL_UINT8(PP_STATE_LAUNCHING, ppLaunchState());
-
-  f.run(5U, 0U);
-  TEST_ASSERT_EQUAL_UINT8(PP_STATE_COMPLETE, ppLaunchState());
   TEST_ASSERT_EQUAL_UINT16(UINT16_MAX, ppLaunchRpmLimit());
-
-  // COMPLETE must LATCH: the driver released the arm input to launch, so falling back to IDLE on
-  // the next millisecond would destroy the only record that the run finished.
-  f.run(100U, 0U);
-  TEST_ASSERT_EQUAL_UINT8(PP_STATE_COMPLETE, ppLaunchState());
 }
 
-void test_rearm_below_axis_returns_to_idle(void)
+// =====================================================================================
+// Hard limiter strategy
+// =====================================================================================
+
+void test_strategy_bits_are_combined_and_reported(void)
 {
   Fixture f;
-  ppLaunchGetSpeedPageMutable().rearmBelowAxis = 100U;
+  setupSoftZone(f, 100U, 1000U, 10U);
+  ppLaunchSpeedBlock &s = ppLaunchGetSpeedPageMutable();
+  s.limiterStrategy = (uint8_t)(PP_STRAT_BOOST_REDUCE | PP_STRAT_SPARK_CUT);
 
   f.launch(0U);
-  TEST_ASSERT_EQUAL_UINT8(PP_STATE_LAUNCHING, ppLaunchState());
-
-  f.run(50U, 500U);
-  TEST_ASSERT_EQUAL_UINT8(PP_STATE_LAUNCHING, ppLaunchState());
-
-  f.run(5U, 50U);   // coasted back to stage
-  TEST_ASSERT_EQUAL_UINT8(PP_STATE_IDLE, ppLaunchState());
+  f.run(20U, 500U);   // inside the launch window
+  TEST_ASSERT_EQUAL_UINT8((uint8_t)(PP_STRAT_BOOST_REDUCE | PP_STRAT_SPARK_CUT),
+                          ppLaunchStrategy());
 }
 
-// =====================================================================================
-// Speed mode: retard, limit, trim
-// =====================================================================================
-
-void test_retard_follows_the_curve_and_goes_through_the_torque_bus(void)
+void test_no_strategy_means_no_limit(void)
 {
   Fixture f;
-  for (uint8_t i = 0U; i < PP_CURVE_POINTS; ++i) { ppLaunchGetSpeedPageMutable().curveRetard[i] = 100U; }
+  setupSoftZone(f, 100U, 1000U, 10U);
+  ppLaunchGetSpeedPageMutable().limiterStrategy = 0U;
 
-  f.launch();
-  f.run(100U, 0U);
-
-  TEST_ASSERT_EQUAL_UINT8(10, ppLaunchRetard());
-  // Routing through the bus is what stops launch retard summing with the race-time curve.
-  TEST_ASSERT_EQUAL_INT8(10, torqueBusRetard());
-  TEST_ASSERT_EQUAL_UINT8((uint8_t)TorqueProducer::Launch, (uint8_t)torqueBusRetardProducer());
-}
-
-void test_retard_rounds_to_nearest_and_honours_large_values(void)
-{
-  Fixture f;
-  // 45.6 degrees: past any byte-era limit, and it must round up rather than truncate.
-  for (uint8_t i = 0U; i < PP_CURVE_POINTS; ++i) { ppLaunchGetSpeedPageMutable().curveRetard[i] = 456U; }
-
-  f.launch();
-  f.run(100U, 0U);
-  TEST_ASSERT_EQUAL_UINT8(46, ppLaunchRetard());
-}
-
-void test_a_descending_retard_curve_does_not_wrap(void)
-{
-  Fixture f;
-  ppLaunchSpeedBlock &s = ppLaunchGetSpeedPageMutable();
-  for (uint8_t i = 0U; i < PP_CURVE_POINTS; ++i) { s.curveRetard[i] = 0U; }
-  s.curveRetard[0] = 200U;   // 20.0 at t=0
-  s.curveRetard[1] = 0U;     // 0.0 at t=100
-
-  f.launch();
-  f.run(50U, 0U);
-  TEST_ASSERT_EQUAL_UINT8(10, ppLaunchRetard());   // halfway down, not clamped to 20
-}
-
-void test_retard_slew_limits_the_rate_in_both_directions(void)
-{
-  Fixture f;
-  ppLaunchSpeedBlock &s = ppLaunchGetSpeedPageMutable();
-  s.featureFlags |= PP_FLAG_RETARD_SLEW;
-  s.retardSlewTenths = 1000U;   // 1000 tenths/s = 100 deg/s
-
-  for (uint8_t i = 0U; i < PP_CURVE_POINTS; ++i)
-  {
-    s.curveRetard[i] = (i <= 10U) ? 200U : 0U;   // 20 deg held to t=1000, then released
-  }
-
-  f.launch();
-  f.run(50U, 0U);
-  const uint8_t climbing = ppLaunchRetard();
-  TEST_ASSERT_TRUE_MESSAGE(climbing > 0U, "slew must move toward the target");
-  TEST_ASSERT_TRUE_MESSAGE(climbing < 20U, "slew must not arrive at 20 deg in 50 ms");
-
-  f.run(500U, 0U);
-  TEST_ASSERT_EQUAL_UINT8(20, ppLaunchRetard());
-
-  f.run(600U, 0U);   // past t=1000, the curve asks for zero
-  const uint8_t falling = ppLaunchRetard();
-  TEST_ASSERT_TRUE_MESSAGE(falling < 20U, "retard must have started falling");
-  TEST_ASSERT_TRUE_MESSAGE(falling > 0U, "retard must not snap to zero in one step");
-
-  f.run(1000U, 0U);
-  TEST_ASSERT_EQUAL_UINT8(0, ppLaunchRetard());
-}
-
-void test_limit_follows_the_curve_and_uses_the_configured_method(void)
-{
-  Fixture f;
-  for (uint8_t i = 0U; i < PP_CURVE_POINTS; ++i) { ppLaunchGetSpeedPageMutable().curveLimit[i] = 5500U; }
-
-  f.launch();
-  f.run(100U, 0U);
-
-  TEST_ASSERT_EQUAL_UINT16(5500, ppLaunchRpmLimit());
-  TEST_ASSERT_EQUAL_UINT8(PP_LIMIT_SPARK, ppLaunchLimitMethod());
-  TEST_ASSERT_TRUE(ppLaunchIsLimiting());
-}
-
-void test_limit_method_none_disables_the_limiter_but_keeps_retard(void)
-{
-  Fixture f;
-  ppLaunchSpeedBlock &s = ppLaunchGetSpeedPageMutable();
-  s.limitMethod = PP_LIMIT_NONE;
-  for (uint8_t i = 0U; i < PP_CURVE_POINTS; ++i)
-  {
-    s.curveLimit[i] = 5000U;
-    s.curveRetard[i] = 100U;
-  }
-
-  f.launch();
-  f.run(100U, 0U);
-
+  f.launch(0U);
+  f.run(20U, 500U);
   TEST_ASSERT_EQUAL_UINT16(UINT16_MAX, ppLaunchRpmLimit());
-  TEST_ASSERT_EQUAL_UINT8(10, ppLaunchRetard());
+  TEST_ASSERT_EQUAL_UINT8(0, ppLaunchStrategy());
 }
 
-void test_start_gate_blocks_the_limiter_above_its_speed(void)
+// =====================================================================================
+// Both modes running simultaneously
+// =====================================================================================
+
+void test_both_modes_run_at_once_and_the_lower_limit_wins(void)
 {
   Fixture f;
-  ppLaunchSpeedBlock &s = ppLaunchGetSpeedPageMutable();
-  s.startBelowAxis = 100U;   // 10.0 mph
-  for (uint8_t i = 0U; i < PP_CURVE_POINTS; ++i) { s.curveLimit[i] = 5000U; }
+  setupSoftZone(f, 100U, 4000U, 10U);   // speed page: limit 4000
 
-  f.launch(0U);
-  f.run(50U, 50U);
-  TEST_ASSERT_TRUE(ppLaunchIsLimiting());
-
-  f.run(50U, 500U);   // the car has left
-  TEST_ASSERT_FALSE(ppLaunchIsLimiting());
-}
-
-void test_speed_mode_duty_trim_is_gated_on_its_flag(void)
-{
-  Fixture f;
-  ppLaunchSpeedBlock &s = ppLaunchGetSpeedPageMutable();
-  for (uint8_t i = 0U; i < PP_CURVE_POINTS; ++i) { s.curveBoostTrim[i] = 30U; }
-
-  // Flag on: the trim is published.
-  s.featureFlags |= PP_FLAG_DUTY_TRIM;
-  f.launch();
-  f.run(100U, 0U);
-  TEST_ASSERT_EQUAL_UINT8(30, ppLaunchBoostTrim());
-
-  // Flag off: the curve is inert.
-  s.featureFlags = (uint8_t)(s.featureFlags & (uint8_t)(~PP_FLAG_DUTY_TRIM));
-  f.run(100U, 0U);
-  TEST_ASSERT_EQUAL_UINT8(0, ppLaunchBoostTrim());
-}
-
-// =====================================================================================
-// Speed mode: perfect-pass scoring
-// =====================================================================================
-
-void test_slip_is_signed_and_only_positive_slip_is_corrected(void)
-{
-  Fixture f;
-  ppLaunchSpeedBlock &s = ppLaunchGetSpeedPageMutable();
-  for (uint8_t i = 0U; i < PP_CURVE_POINTS; ++i)
-  {
-    s.curveAxis[i] = 200U;   // wire says 20.0 mph
-    s.curveRetard[i] = 0U;
-    s.curveBoostTrim[i] = 0U;
-  }
-  // 1 degree of retard and 10% trim per 10 units of slip.
-  s.slipBin[0] = 0U;  s.slipRetard[0] = 0U;  s.slipBoostTrim[0] = 0U;
-  s.slipBin[1] = 10U; s.slipRetard[1] = 10U; s.slipBoostTrim[1] = 10U;
-  for (uint8_t i = 2U; i < PP_SLIP_POINTS; ++i)
-  {
-    s.slipBin[i] = (uint16_t)(s.slipBin[i - 1U] + 100U);
-    s.slipRetard[i] = s.slipRetard[i - 1U];
-    s.slipBoostTrim[i] = s.slipBoostTrim[i - 1U];
-  }
-
-  // Ahead of the wire = wheelspin: correction applies.
-  f.launch(0U);
-  f.run(100U, 210U);
-  TEST_ASSERT_EQUAL_INT16(10, ppLaunchSlip());
-  TEST_ASSERT_EQUAL_UINT8(1, ppLaunchRetard());
-  TEST_ASSERT_EQUAL_UINT8(10, ppLaunchBoostTrim());
-
-  // Behind the wire = a bog. Pulling timing from a car that is already slow makes it slower, so
-  // the correction must NOT apply. That asymmetry is the difference between a correction and a
-  // mistake.
-  Fixture f2;
-  ppLaunchSpeedBlock &s2 = ppLaunchGetSpeedPageMutable();
-  for (uint8_t i = 0U; i < PP_CURVE_POINTS; ++i) { s2.curveAxis[i] = 200U; s2.curveRetard[i] = 0U; }
-  s2.slipBin[1] = 10U; s2.slipRetard[1] = 100U;
-  f2.launch(0U);
-  f2.run(100U, 190U);
-  TEST_ASSERT_EQUAL_INT16(-10, ppLaunchSlip());
-  TEST_ASSERT_EQUAL_UINT8(0, ppLaunchRetard());
-}
-
-// =====================================================================================
-// RPM mode: the simple limiter
-// =====================================================================================
-
-/** @brief Configure and enable the RPM page instead of the speed page. */
-void enableRpmMode(Fixture &f)
-{
-  ppLaunchGetSpeedPageMutable().enable = PP_DISABLED;
   ppLaunchRpmBlock &r = ppLaunchGetRpmPageMutable();
   r.enable = PP_ENABLED;
   r.armPin = 0;
   r.armPolarity = 0;
   r.timeoutMs = 0;
-  r.cutMethod = PP_LIMIT_SPARK;
-  (void)f;
-}
-
-void test_rpm_mode_follows_the_limit_curve_versus_time(void)
-{
-  Fixture f;
-  enableRpmMode(f);
-  ppLaunchRpmBlock &r = ppLaunchGetRpmPageMutable();
-  for (uint8_t i = 0U; i < PP_RPM_CURVE_POINTS; ++i) { r.curveLimit[i] = 5000U; }
-
-  f.launch(0U);
-  f.runRpm(100U, 3000U);
-
-  TEST_ASSERT_EQUAL_UINT8(PP_MODE_RPM, (uint8_t)ppLaunchActiveMode());
-  TEST_ASSERT_EQUAL_UINT16(5000, ppLaunchRpmLimit());
-  TEST_ASSERT_EQUAL_UINT8(PP_LIMIT_SPARK, (uint8_t)ppLaunchLimitMethod());
-}
-
-void test_rpm_mode_limit_ramps_with_time(void)
-{
-  Fixture f;
-  enableRpmMode(f);
-  ppLaunchRpmBlock &r = ppLaunchGetRpmPageMutable();
-  r.curveLimit[0] = 4000U;
-  r.curveLimit[1] = 5000U;   // t=100
-  for (uint8_t i = 2U; i < PP_RPM_CURVE_POINTS; ++i) { r.curveLimit[i] = 5000U; }
-
-  f.launch(0U);
-  f.runRpm(50U, 3000U);
-  TEST_ASSERT_EQUAL_UINT16(4500, ppLaunchRpmLimit());   // halfway up the ramp
-  f.runRpm(100U, 3000U);
-  TEST_ASSERT_EQUAL_UINT16(5000, ppLaunchRpmLimit());
-}
-
-void test_rpm_mode_soft_retard_engages_within_the_zone(void)
-{
-  Fixture f;
-  enableRpmMode(f);
-  ppLaunchRpmBlock &r = ppLaunchGetRpmPageMutable();
-  for (uint8_t i = 0U; i < PP_RPM_CURVE_POINTS; ++i) { r.curveLimit[i] = 6000U; }
-  r.softZoneRpm = 300U;         // engages at 5700
-  r.softHystRpm = 100U;
-  r.softRetardTenths = 80U;     // 8.0 degrees
-  r.retardSlewTenths = 0U;      // immediate, so the test reads the band not the ramp
-
-  f.launch(0U);
-  f.runRpm(100U, 5000U);        // well below the zone
-  TEST_ASSERT_EQUAL_UINT8(0, ppLaunchRetard());
-
-  f.runRpm(10U, 5750U);         // inside the zone
-  TEST_ASSERT_EQUAL_UINT8(8, ppLaunchRetard());
-}
-
-void test_rpm_mode_soft_retard_hysteresis_prevents_flicker(void)
-{
-  Fixture f;
-  enableRpmMode(f);
-  ppLaunchRpmBlock &r = ppLaunchGetRpmPageMutable();
-  for (uint8_t i = 0U; i < PP_RPM_CURVE_POINTS; ++i) { r.curveLimit[i] = 6000U; }
-  r.softZoneRpm = 300U;     // engage at 5700
-  r.softHystRpm = 100U;     // release only below 5600
-  r.softRetardTenths = 80U;
-  r.retardSlewTenths = 0U;
-
-  f.launch(0U);
-  f.runRpm(100U, 5750U);
-  TEST_ASSERT_EQUAL_UINT8(8, ppLaunchRetard());   // engaged
-
-  // Dropping just below the engage point must NOT release it - that is the hysteresis band, and
-  // without it the timing would flicker on and off right at the boundary.
-  f.runRpm(10U, 5650U);
-  TEST_ASSERT_EQUAL_UINT8(8, ppLaunchRetard());
-
-  f.runRpm(10U, 5500U);          // below the release point
-  TEST_ASSERT_EQUAL_UINT8(0, ppLaunchRetard());
-}
-
-void test_rpm_mode_soft_zone_of_zero_disables_the_retard(void)
-{
-  Fixture f;
-  enableRpmMode(f);
-  ppLaunchRpmBlock &r = ppLaunchGetRpmPageMutable();
-  for (uint8_t i = 0U; i < PP_RPM_CURVE_POINTS; ++i) { r.curveLimit[i] = 6000U; }
-  r.softZoneRpm = 0U;
-  r.softRetardTenths = 80U;
-
-  f.launch(0U);
-  f.runRpm(100U, 5999U);   // right at the limit
-  TEST_ASSERT_EQUAL_UINT8(0, ppLaunchRetard());
-}
-
-void test_rpm_mode_cut_method_is_selectable(void)
-{
-  const PpLimitMethod methods[] = { PP_LIMIT_SPARK, PP_LIMIT_FUEL, PP_LIMIT_BOTH, PP_LIMIT_ROLLING };
-  for (uint8_t m = 0U; m < 4U; ++m)
+  r.softZonePercent = 10U;
+  r.limiterStrategy = PP_STRAT_SPARK_CUT;
+  // RPM axis 3000..6000, so at 5000 rpm the limit is 5000.
+  for (uint8_t i = 0U; i < PP_CURVE_POINTS; ++i)
   {
-    Fixture f;
-    enableRpmMode(f);
-    ppLaunchRpmBlock &r = ppLaunchGetRpmPageMutable();
-    r.cutMethod = (uint8_t)methods[m];
-    for (uint8_t i = 0U; i < PP_RPM_CURVE_POINTS; ++i) { r.curveLimit[i] = 5000U; }
-
-    f.launch(0U);
-    f.runRpm(100U, 3000U);
-    TEST_ASSERT_EQUAL_UINT8((uint8_t)methods[m], (uint8_t)ppLaunchLimitMethod());
+    r.axisValue[i] = (uint16_t)(3000U + (i * 3000U) / (PP_CURVE_POINTS - 1U));
+    r.rowRetard[i] = 50U;
+    r.rowTimeMs[i] = (uint16_t)(i * 100U);
   }
-}
-
-void test_rpm_mode_no_cut_still_allows_retard(void)
-{
-  Fixture f;
-  enableRpmMode(f);
-  ppLaunchRpmBlock &r = ppLaunchGetRpmPageMutable();
-  r.cutMethod = PP_LIMIT_NONE;
-  for (uint8_t i = 0U; i < PP_RPM_CURVE_POINTS; ++i) { r.curveLimit[i] = 6000U; }
-  r.softZoneRpm = 300U;
-  r.softRetardTenths = 80U;
-  r.retardSlewTenths = 0U;
+  r.axisValue[PP_CURVE_POINTS - 1U] = 6000U;
 
   f.launch(0U);
-  f.runRpm(100U, 5900U);
+  f.current.RPM = 5000U;
+  f.run(20U, 500U);
 
-  TEST_ASSERT_EQUAL_UINT16(UINT16_MAX, ppLaunchRpmLimit());  // no limiter
-  TEST_ASSERT_EQUAL_UINT8(8, ppLaunchRetard());              // but the soft retard works
+  // Both modes are live: the RPM page says 5000, the speed page says 4000, so 4000 binds.
+  TEST_ASSERT_EQUAL_UINT16(4000, ppLaunchRpmLimit());
 }
 
-void test_rpm_mode_retard_also_goes_through_the_torque_bus(void)
+void test_each_mode_keeps_its_own_table(void)
 {
-  Fixture f;
-  enableRpmMode(f);
-  ppLaunchRpmBlock &r = ppLaunchGetRpmPageMutable();
-  for (uint8_t i = 0U; i < PP_RPM_CURVE_POINTS; ++i) { r.curveLimit[i] = 6000U; }
-  r.softZoneRpm = 300U;
-  r.softRetardTenths = 120U;   // 12 deg
-  r.retardSlewTenths = 0U;
-
-  f.launch(0U);
-  f.runRpm(100U, 5900U);
-  TEST_ASSERT_EQUAL_INT8(12, torqueBusRetard());
-}
-
-// =====================================================================================
-// Launch boost target (page 20) - the base-target layering
-// =====================================================================================
-
-void test_launch_boost_contributes_nothing_when_disabled(void)
-{
-  Fixture f;
-  boostLaunchUpdate(f.current);
-  TEST_ASSERT_FALSE(boostLaunchIsActive());
-  TEST_ASSERT_EQUAL_UINT16(0, boostLaunchBaseTarget());
-  TEST_ASSERT_EQUAL_UINT8(0, boostLaunchDutyTrim());
-}
-
-void test_launch_boost_is_inactive_before_the_launch(void)
-{
-  Fixture f;
-  boostLaunchGetPageMutable().enable = BL_ENABLED;
-
-  // Enabled, but the car has not launched: the module must contribute nothing, so the boost
-  // controller behaves exactly as if the feature did not exist.
-  f.tick(5U);
-  boostLaunchUpdate(f.current);
-  TEST_ASSERT_FALSE(boostLaunchIsActive());
-}
-
-void test_launch_boost_supplies_the_base_target_while_launching(void)
-{
-  Fixture f;
-  boostLaunchBlock &b = boostLaunchGetPageMutable();
-  b.enable = BL_ENABLED;
-  for (uint8_t i = 0U; i < BL_CURVE_POINTS; ++i) { b.curveTarget[i] = 220U; }
-
-  f.launch(0U);
-  f.run(100U, 0U);
-  boostLaunchUpdate(f.current);
-
-  TEST_ASSERT_TRUE(boostLaunchIsActive());
-  TEST_ASSERT_EQUAL_UINT16(220, boostLaunchBaseTarget());
-}
-
-void test_launch_boost_follows_the_time_curve(void)
-{
-  Fixture f;
-  boostLaunchBlock &b = boostLaunchGetPageMutable();
-  b.enable = BL_ENABLED;
-  // Ramp 200 -> 300 over the first 100 ms, then HOLD 300. Setting only the first two points
-  // would leave the rest at zero and turn the curve into a 300 -> 0 descent.
-  for (uint8_t i = 0U; i < BL_CURVE_POINTS; ++i) { b.curveTarget[i] = 300U; }
-  b.curveTarget[0] = 200U;    // t=0
-  b.curveTarget[1] = 300U;    // t=100
-
-  f.launch(0U);
-  f.run(50U, 0U);
-  boostLaunchUpdate(f.current);
-  TEST_ASSERT_EQUAL_UINT16(250, boostLaunchBaseTarget());   // halfway up
-
-  f.run(100U, 0U);
-  boostLaunchUpdate(f.current);
-  TEST_ASSERT_EQUAL_UINT16(300, boostLaunchBaseTarget());
-}
-
-void test_launch_boost_reverts_fully_when_the_launch_completes(void)
-{
-  // The whole point: no "hold the last value" state. A car that has finished launching belongs
-  // on its normal boost strategy.
-  Fixture f;
-  boostLaunchBlock &b = boostLaunchGetPageMutable();
-  b.enable = BL_ENABLED;
-  for (uint8_t i = 0U; i < BL_CURVE_POINTS; ++i) { b.curveTarget[i] = 250U; }
-
-  const uint16_t lastTime = ppLaunchGetSpeedPage().curveTime[PP_CURVE_POINTS - 1U];
-  f.launch(0U);
-  f.run((uint32_t)lastTime + 5U, 0U);
-  boostLaunchUpdate(f.current);
-
-  TEST_ASSERT_EQUAL_UINT8(PP_STATE_COMPLETE, ppLaunchState());
-  TEST_ASSERT_FALSE_MESSAGE(boostLaunchIsActive(),
-                            "the launch boost module must switch itself off when the pass ends");
-  TEST_ASSERT_EQUAL_UINT16(0, boostLaunchBaseTarget());
-}
-
-void test_launch_boost_zero_target_is_no_override_not_zero_boost(void)
-{
-  // Commanding zero boost because a tuner left a row blank would stall the car.
-  Fixture f;
-  boostLaunchBlock &b = boostLaunchGetPageMutable();
-  b.enable = BL_ENABLED;
-  for (uint8_t i = 0U; i < BL_CURVE_POINTS; ++i)
-  {
-    b.curveTarget[i] = 0U;
-    b.curveDutyTrim[i] = 0U;
-  }
-
-  f.launch(0U);
-  f.run(100U, 0U);
-  boostLaunchUpdate(f.current);
-
-  TEST_ASSERT_FALSE(boostLaunchIsActive());
-  TEST_ASSERT_EQUAL_UINT16(0, boostLaunchBaseTarget());
-}
-
-void test_launch_boost_trim_alone_still_counts_as_active(void)
-{
-  // Trimming duty without moving the target is a normal way to shape the hit, so it must count
-  // as the module being active even though the target is 0.
-  Fixture f;
-  boostLaunchBlock &b = boostLaunchGetPageMutable();
-  b.enable = BL_ENABLED;
-  for (uint8_t i = 0U; i < BL_CURVE_POINTS; ++i)
-  {
-    b.curveTarget[i] = 0U;
-    b.curveDutyTrim[i] = 25U;
-  }
-
-  f.launch(0U);
-  f.run(100U, 0U);
-  boostLaunchUpdate(f.current);
-
-  TEST_ASSERT_TRUE(boostLaunchIsActive());
-  TEST_ASSERT_EQUAL_UINT8(25, boostLaunchDutyTrim());
-}
-
-void test_launch_boost_curves_are_interpolated_not_stepped(void)
-{
-  Fixture f;
-  boostLaunchBlock &b = boostLaunchGetPageMutable();
-  b.enable = BL_ENABLED;
-  for (uint8_t i = 0U; i < BL_CURVE_POINTS; ++i)
-  {
-    b.curveTarget[i] = (uint16_t)(200U + i * 10U);
-    b.curveDutyTrim[i] = (uint8_t)(i * 2U);
-  }
-
-  f.launch(0U);
-  f.run(50U, 0U);    // halfway between 200 (t=0) and 210 (t=100)
-  boostLaunchUpdate(f.current);
-
-  TEST_ASSERT_EQUAL_UINT16(205, boostLaunchBaseTarget());
-  TEST_ASSERT_EQUAL_UINT8(1, boostLaunchDutyTrim());
-}
-
-// =====================================================================================
-// Mode interaction
-// =====================================================================================
-
-void test_each_mode_keeps_its_own_table_when_switching(void)
-{
-  // The requirement behind having two pages at all: flip modes, flip back, and the table you
-  // spent an evening on is still there.
+  // Neither page carries a copy of the other's table - that is what makes simultaneous operation
+  // and independent editing possible.
   ppLaunchSpeedBlock &s = ppLaunchGetSpeedPageMutable();
   ppLaunchRpmBlock &r = ppLaunchGetRpmPageMutable();
-
-  s.enable = PP_ENABLED;
-  r.enable = PP_DISABLED;
-  for (uint8_t i = 0U; i < PP_CURVE_POINTS; ++i) { s.curveRetard[i] = 111U; }
-
-  s.enable = PP_DISABLED;
-  r.enable = PP_ENABLED;
-  for (uint8_t i = 0U; i < PP_RPM_CURVE_POINTS; ++i) { r.curveLimit[i] = 7777U; }
-
-  s.enable = PP_ENABLED;
-  r.enable = PP_DISABLED;
-
-  for (uint8_t i = 0U; i < PP_CURVE_POINTS; ++i) { TEST_ASSERT_EQUAL_UINT16(111U, s.curveRetard[i]); }
-  for (uint8_t i = 0U; i < PP_RPM_CURVE_POINTS; ++i) { TEST_ASSERT_EQUAL_UINT16(7777U, r.curveLimit[i]); }
-}
-
-void test_speed_mode_takes_precedence_when_both_are_enabled(void)
-{
-  Fixture f;
-  ppLaunchGetRpmPageMutable().enable = PP_ENABLED;
-  // Both enabled: the speed page is the more specific controller and wins.
-  TEST_ASSERT_EQUAL_UINT8(PP_MODE_SPEED, (uint8_t)ppLaunchActiveMode());
+  s.rowRetard[3] = 111U;
+  r.rowRetard[3] = 222U;
+  TEST_ASSERT_EQUAL_UINT16(111U, s.rowRetard[3]);
+  TEST_ASSERT_EQUAL_UINT16(222U, r.rowRetard[3]);
 }
 
 // =====================================================================================
-// Safety interlocks
+// Reactions
+// =====================================================================================
+
+void test_reactions_do_nothing_when_disabled(void)
+{
+  Fixture f;
+  setupSoftZone(f, 100U, 1000U, 10U);
+  f.launch(0U);
+  f.run(50U, 1000U);   // at the hard limit for 50 ms
+  TEST_ASSERT_EQUAL_INT16(0, ppLaunchFuelAdd());
+  TEST_ASSERT_EQUAL_INT16(0, ppLaunchBoostDutyAdj());
+}
+
+void test_reactions_ramp_with_sustained_time_at_the_limit(void)
+{
+  Fixture f;
+  setupSoftZone(f, 100U, 1000U, 10U);
+
+  ppLaunchReactBlock &x = ppLaunchGetReactPageMutable();
+  x.enable = BL_ENABLED;
+  for (uint8_t i = 0U; i < PP_REACTION_POINTS; ++i)
+  {
+    x.axisTimeMs[i] = PP_REACTION_TIME_MS[i];
+    x.fuelAddPercent[i] = (uint16_t)(i * 10U);   // 0,10,20,30,40,50
+    x.boostDutyAdj[i] = 0;
+    x.boostTargetAdj[i] = 0;
+    x.retardAdj[i] = 0;
+  }
+
+  // At the hard limit right away, so the hit-timer accumulates.
+  f.launch(0U);
+  f.run(20U, 1000U);
+  TEST_ASSERT_TRUE(ppLaunchIsLimiting());
+  TEST_ASSERT_GREATER_THAN_UINT16(0U, ppLaunchLimitHitMs());
+  const int16_t early = ppLaunchFuelAdd();
+
+  f.run(300U, 1000U);   // 300+ ms at the limit
+  TEST_ASSERT_GREATER_THAN_INT16(early, ppLaunchFuelAdd());
+}
+
+void test_reaction_fuel_boost_and_retard_are_all_published(void)
+{
+  Fixture f;
+  setupSoftZone(f, 100U, 1000U, 10U);
+
+  ppLaunchReactBlock &x = ppLaunchGetReactPageMutable();
+  x.enable = BL_ENABLED;
+  for (uint8_t i = 0U; i < PP_REACTION_POINTS; ++i)
+  {
+    x.axisTimeMs[i] = PP_REACTION_TIME_MS[i];
+    x.fuelAddPercent[i] = 8U;
+    x.boostDutyAdj[i] = -12;
+    x.boostTargetAdj[i] = -6;
+    x.retardAdj[i] = 30U;   // 3.0 deg
+  }
+
+  f.launch(0U);
+  f.run(60U, 1000U);
+
+  TEST_ASSERT_EQUAL_INT16(8, ppLaunchFuelAdd());
+  TEST_ASSERT_EQUAL_INT16(-12, ppLaunchBoostDutyAdj());
+  TEST_ASSERT_EQUAL_INT16(-6, ppLaunchBoostTargetAdj());
+}
+
+void test_the_hit_timer_resets_when_the_limit_is_left(void)
+{
+  Fixture f;
+  setupSoftZone(f, 100U, 1000U, 10U);
+  ppLaunchReactBlock &x = ppLaunchGetReactPageMutable();
+  x.enable = BL_ENABLED;
+
+  f.launch(0U);
+  f.run(200U, 1000U);          // fighting the limit
+  TEST_ASSERT_GREATER_THAN_UINT16(0U, ppLaunchLimitHitMs());
+
+  // Come off the limit (the car has left the launch window) - the episode is over.
+  ppLaunchGetSpeedPageMutable().limiterStrategy = 0U;
+  f.run(5U, 1000U);
+  TEST_ASSERT_EQUAL_UINT16(0, ppLaunchLimitHitMs());
+}
+
+// =====================================================================================
+// Safety
 // =====================================================================================
 
 void test_a_speed_axis_without_a_vss_input_refuses_to_run(void)
 {
   Fixture f;
+  setupSoftZone(f, 100U, 1000U, 10U);
   f.page2.vssMode = VSS_MODE_OFF;
 
   f.launch(0U);
-  f.run(100U, 500U);
-
-  TEST_ASSERT_EQUAL_UINT16(UINT16_MAX, ppLaunchRpmLimit());
+  f.run(100U, 1000U);
   TEST_ASSERT_EQUAL_UINT8(0, ppLaunchRetard());
 }
 
 void test_retard_never_exceeds_the_scheduler_maximum(void)
 {
   Fixture f;
-  ppLaunchSpeedBlock &s = ppLaunchGetSpeedPageMutable();
-  for (uint8_t i = 0U; i < PP_CURVE_POINTS; ++i) { s.curveRetard[i] = 600U; }
-  for (uint8_t i = 0U; i < PP_SLIP_POINTS; ++i)
+  setupSoftZone(f, 600U, 1000U, 10U);   // 60.0 deg
+
+  ppLaunchReactBlock &x = ppLaunchGetReactPageMutable();
+  x.enable = BL_ENABLED;
+  for (uint8_t i = 0U; i < PP_REACTION_POINTS; ++i)
   {
-    s.slipBin[i] = (uint16_t)(i * 10U);
-    s.slipRetard[i] = 600U;
+    x.axisTimeMs[i] = PP_REACTION_TIME_MS[i];
+    x.retardAdj[i] = 600;   // another 60 deg on top
   }
 
   f.launch(0U);
-  f.run(100U, 5000U);
+  f.run(600U, 1000U);
   TEST_ASSERT_TRUE(ppLaunchRetard() <= 60U);
+  TEST_ASSERT_TRUE((uint8_t)torqueBusRetard() <= 60U);
 }
 
 // =====================================================================================
@@ -917,29 +566,26 @@ void test_retard_never_exceeds_the_scheduler_maximum(void)
 
 void test_restore_defaults_covers_all_three_pages(void)
 {
-  ppLaunchGetSpeedPageMutable().curveRetard[0] = 1U;
-  ppLaunchGetRpmPageMutable().curveLimit[0] = 1U;
-  boostLaunchGetPageMutable().curveTarget[0] = 1U;
+  ppLaunchGetSpeedPageMutable().rowRetard[0] = 1U;
+  ppLaunchGetRpmPageMutable().rowRetard[0] = 1U;
+  ppLaunchGetReactPageMutable().fuelAddPercent[0] = 99U;
 
   ppLaunchRestoreDefaults();
-  boostLaunchRestoreDefaults();
 
-  // Not zero: a zeroed launch curve reads as "no limiter configured" everywhere it is consulted.
-  TEST_ASSERT_EQUAL_UINT16(120U, ppLaunchGetSpeedPage().curveRetard[0]);
-  TEST_ASSERT_EQUAL_UINT16(4200U, ppLaunchGetRpmPage().curveLimit[0]);
-  // The boost page defaults to a REAL curve too - a zeroed one would be an invisible feature.
-  TEST_ASSERT_TRUE(boostLaunchGetPage().curveTarget[0] > 0U);
+  TEST_ASSERT_EQUAL_UINT16(120U, ppLaunchGetSpeedPage().rowRetard[0]);
+  TEST_ASSERT_EQUAL_UINT16(100U, ppLaunchGetRpmPage().rowRetard[0]);
+  TEST_ASSERT_EQUAL_UINT16(0U, ppLaunchGetReactPage().fuelAddPercent[0]);
 }
 
-void test_the_three_pages_do_not_alias_each_other(void)
+void test_the_three_pages_do_not_alias(void)
 {
-  ppLaunchGetSpeedPageMutable().curveTime[1] = 101U;
-  ppLaunchGetRpmPageMutable().curveTime[1] = 202U;
-  boostLaunchGetPageMutable().curveTime[1] = 303U;
+  ppLaunchGetSpeedPageMutable().rowTimeMs[1] = 101U;
+  ppLaunchGetRpmPageMutable().rowTimeMs[1] = 202U;
+  ppLaunchGetReactPageMutable().axisTimeMs[1] = 303U;
 
-  TEST_ASSERT_EQUAL_UINT16(101U, ppLaunchGetSpeedPage().curveTime[1]);
-  TEST_ASSERT_EQUAL_UINT16(202U, ppLaunchGetRpmPage().curveTime[1]);
-  TEST_ASSERT_EQUAL_UINT16(303U, boostLaunchGetPage().curveTime[1]);
+  TEST_ASSERT_EQUAL_UINT16(101U, ppLaunchGetSpeedPage().rowTimeMs[1]);
+  TEST_ASSERT_EQUAL_UINT16(202U, ppLaunchGetRpmPage().rowTimeMs[1]);
+  TEST_ASSERT_EQUAL_UINT16(303U, ppLaunchGetReactPage().axisTimeMs[1]);
 }
 
 // =====================================================================================
@@ -952,73 +598,45 @@ void testPpLaunch(void)
 {
   UNITY_BEGIN();
 
-  // Layout contract
-  RUN_TEST(test_both_launch_pages_are_whole_tunerstudio_pages);
-  RUN_TEST(test_boost_page_is_a_kilobyte_with_room_to_grow);
+  RUN_TEST(test_all_three_pages_are_whole_tunerstudio_pages);
+  RUN_TEST(test_the_table_is_one_axis_and_two_tied_rows);
+  RUN_TEST(test_there_is_no_second_rpm_or_retard_vs_time_table);
   RUN_TEST(test_speed_page_offsets_match_the_ini);
   RUN_TEST(test_rpm_page_offsets_match_the_ini);
-  RUN_TEST(test_boost_page_offsets_match_the_ini);
-  RUN_TEST(test_the_rpm_page_is_simple_on_purpose);
+  RUN_TEST(test_reactions_page_offsets_match_the_ini);
   RUN_TEST(test_blocks_do_not_overlap);
   RUN_TEST(test_each_block_has_a_distinct_magic);
 
-  // Defaults
-  RUN_TEST(test_every_mode_ships_disabled_but_configured);
-  RUN_TEST(test_time_axes_ship_strictly_ascending);
-  RUN_TEST(test_rpm_defaults_ramp_rather_than_sit_flat);
+  RUN_TEST(test_all_three_ship_disabled);
+  RUN_TEST(test_speed_axis_ships_strictly_ascending);
+  RUN_TEST(test_reaction_axis_is_the_fixed_six_points);
 
-  // Speed mode: state machine
-  RUN_TEST(test_arming_does_not_start_the_clock_or_apply_anything);
+  RUN_TEST(test_retard_is_zero_at_or_below_the_soft_limit);
+  RUN_TEST(test_retard_ramps_linearly_from_soft_to_hard_limit);
+  RUN_TEST(test_just_tripping_the_soft_limit_pulls_very_little);
+  RUN_TEST(test_a_wider_soft_zone_starts_pulling_earlier);
+  RUN_TEST(test_the_soft_zone_scales_with_the_setpoint);
+
   RUN_TEST(test_release_edge_starts_the_clock);
   RUN_TEST(test_armed_timeout_prevents_an_indefinitely_armed_car);
   RUN_TEST(test_disabling_mid_pass_drops_every_output);
-  RUN_TEST(test_the_pass_completes_at_the_end_of_the_curve_and_latches);
-  RUN_TEST(test_rearm_below_axis_returns_to_idle);
 
-  // Speed mode: retard / limit / trim
-  RUN_TEST(test_retard_follows_the_curve_and_goes_through_the_torque_bus);
-  RUN_TEST(test_retard_rounds_to_nearest_and_honours_large_values);
-  RUN_TEST(test_a_descending_retard_curve_does_not_wrap);
-  RUN_TEST(test_retard_slew_limits_the_rate_in_both_directions);
-  RUN_TEST(test_limit_follows_the_curve_and_uses_the_configured_method);
-  RUN_TEST(test_limit_method_none_disables_the_limiter_but_keeps_retard);
-  RUN_TEST(test_start_gate_blocks_the_limiter_above_its_speed);
-  RUN_TEST(test_speed_mode_duty_trim_is_gated_on_its_flag);
+  RUN_TEST(test_strategy_bits_are_combined_and_reported);
+  RUN_TEST(test_no_strategy_means_no_limit);
 
-  // Speed mode: perfect-pass
-  RUN_TEST(test_slip_is_signed_and_only_positive_slip_is_corrected);
+  RUN_TEST(test_both_modes_run_at_once_and_the_lower_limit_wins);
+  RUN_TEST(test_each_mode_keeps_its_own_table);
 
-  // RPM mode
-  RUN_TEST(test_rpm_mode_follows_the_limit_curve_versus_time);
-  RUN_TEST(test_rpm_mode_limit_ramps_with_time);
-  RUN_TEST(test_rpm_mode_soft_retard_engages_within_the_zone);
-  RUN_TEST(test_rpm_mode_soft_retard_hysteresis_prevents_flicker);
-  RUN_TEST(test_rpm_mode_soft_zone_of_zero_disables_the_retard);
-  RUN_TEST(test_rpm_mode_cut_method_is_selectable);
-  RUN_TEST(test_rpm_mode_no_cut_still_allows_retard);
-  RUN_TEST(test_rpm_mode_retard_also_goes_through_the_torque_bus);
+  RUN_TEST(test_reactions_do_nothing_when_disabled);
+  RUN_TEST(test_reactions_ramp_with_sustained_time_at_the_limit);
+  RUN_TEST(test_reaction_fuel_boost_and_retard_are_all_published);
+  RUN_TEST(test_the_hit_timer_resets_when_the_limit_is_left);
 
-  // Launch boost (page 20)
-  RUN_TEST(test_launch_boost_contributes_nothing_when_disabled);
-  RUN_TEST(test_launch_boost_is_inactive_before_the_launch);
-  RUN_TEST(test_launch_boost_supplies_the_base_target_while_launching);
-  RUN_TEST(test_launch_boost_follows_the_time_curve);
-  RUN_TEST(test_launch_boost_reverts_fully_when_the_launch_completes);
-  RUN_TEST(test_launch_boost_zero_target_is_no_override_not_zero_boost);
-  RUN_TEST(test_launch_boost_trim_alone_still_counts_as_active);
-  RUN_TEST(test_launch_boost_curves_are_interpolated_not_stepped);
-
-  // Mode interaction
-  RUN_TEST(test_each_mode_keeps_its_own_table_when_switching);
-  RUN_TEST(test_speed_mode_takes_precedence_when_both_are_enabled);
-
-  // Safety
   RUN_TEST(test_a_speed_axis_without_a_vss_input_refuses_to_run);
   RUN_TEST(test_retard_never_exceeds_the_scheduler_maximum);
 
-  // Storage
   RUN_TEST(test_restore_defaults_covers_all_three_pages);
-  RUN_TEST(test_the_three_pages_do_not_alias_each_other);
+  RUN_TEST(test_the_three_pages_do_not_alias);
 
   UNITY_END();
 }

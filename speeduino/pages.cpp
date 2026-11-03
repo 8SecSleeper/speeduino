@@ -389,6 +389,10 @@ static page_map_t getPageMap(uint8_t pageNumber)
   static constexpr entity_t boostLaunchPageMap[] PROGMEM = {
     makeEntity(&boostLaunchData, sizeof(boostLaunchBlock)),
   };
+  // Page 21: the launch reactions table. Single raw entity for the same reason as the rest.
+  static constexpr entity_t ppLaunchReactPageMap[] PROGMEM = {
+    makeEntity(&ppLaunchReactData, sizeof(ppLaunchReactBlock)),
+  };
 
   static constexpr page_map_t pageMaps[MAX_PAGE_NUM] PROGMEM = {
     { pageZeroMap, _countof(pageZeroMap) },
@@ -412,6 +416,7 @@ static page_map_t getPageMap(uint8_t pageNumber)
     { ppLaunchPageMap, _countof(ppLaunchPageMap) },
     { ppLaunchRpmPageMap, _countof(ppLaunchRpmPageMap) },
     { boostLaunchPageMap, _countof(boostLaunchPageMap) },
+    { ppLaunchReactPageMap, _countof(ppLaunchReactPageMap) },
   };
 
   if (pageNumber>=MAX_PAGE_NUM)

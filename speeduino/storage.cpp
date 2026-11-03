@@ -215,6 +215,7 @@ TESTABLE_STATIC uint16_t getEntityStartAddress(page_iterator_t iter) {
     { &ppLaunchSpeedData, EEPROM_PPLAUNCH_SPEED_PAYLOAD },
     { &ppLaunchRpmData, EEPROM_PPLAUNCH_RPM_PAYLOAD },
     { &boostLaunchData, EEPROM_BOOSTLAUNCH_PAYLOAD },
+    { &ppLaunchReactData, EEPROM_PPLAUNCH_REACT_PAYLOAD },
   };
   static const constexpr entity_storage_map_t* entityMapEnd = entityMap + _countof(entityMap);
 
@@ -508,6 +509,16 @@ void savePage(uint8_t pageNum)
       | owns persisted state. Same budget contract as the pages above.
       -----------------------------------------------------*/
       writesRemaining = boostLaunchSaveBlock(writesRemaining);
+      break;
+
+    case ppLaunchReactPage:
+      /*---------------------------------------------------
+      | Launch control reactions - Page 21 (See ppLaunch.h for layout)
+
+      | Separate page and separate block: what the launch DOES about a sustained hard limit is a
+      | different question from where the limit is. Same budget contract as the pages above.
+      -----------------------------------------------------*/
+      writesRemaining = ppLaunchSaveBlock(PP_MODE_REACT, writesRemaining);
       break;
 
     default:

@@ -12,33 +12,30 @@
 
 /**
  * @file
- * @brief Launch control: state machine, per-mode curve evaluation and persistence.
+ * @brief Launch control: state machines, table evaluation and persistence.
  *
- * See ppLaunch.h for why the two modes have deliberately different shapes. The properties that
- * are easy to break by accident, restated:
+ * See ppLaunch.h for the one-axis-three-rows shape, the simultaneous-modes contract and the
+ * linear soft-zone retard. The properties that are easy to break by accident, restated:
  *
  *  1. Every clock advances only from @ref ppLaunchTick1ms. Anything else that adds to it makes
  *     the elapsed time depend on loop cadence, and every consumer inherits the error.
- *  2. Every output (limit, retard, duty trim) is zero unless the state machine is LAUNCHING.
+ *  2. Every output is zero unless the relevant state machine is LAUNCHING.
  *  3. Retard leaves through the torque bus, never by writing `advance`.
- *  4. Nothing here touches storage unless the backend can hold both blocks.
+ *  4. Nothing here touches storage unless the backend can hold all three blocks.
  *
- * Curve evaluation happens on EVERY main-loop pass, deliberately. An earlier draft rate-limited
- * it to 100 Hz "because 32-point interpolations feel expensive"; that is the same mistake this
- * tree already fixed once in launchController, which re-tested a 10 Hz bit and silently capped a
- * drag launch at ~100 ms of lag - longer than the whole first 60 feet. Three interpolations of
- * 32 points is a few hundred comparisons next to a loop that already runs at several kHz.
+ * Curve evaluation happens on EVERY main-loop pass. An earlier draft rate-limited it to 100 Hz
+ * "because 32-point interpolations feel expensive"; that is the same mistake this tree already
+ * fixed once in launchController, which re-tested a 10 Hz bit and silently capped a drag launch
+ * at ~100 ms of lag - longer than the whole first 60 feet.
  */
 
 // =====================================================================================
-// The two page payloads
+// The three page payloads
 // =====================================================================================
 
-/** @brief Page 18: the speed-based reference-trajectory controller. */
 ppLaunchSpeedBlock ppLaunchSpeedData;
-
-/** @brief Page 19: the simple RPM limiter. */
 ppLaunchRpmBlock ppLaunchRpmData;
+ppLaunchReactBlock ppLaunchReactData;
 
 // =====================================================================================
 // Runtime state
@@ -51,51 +48,66 @@ namespace {
 
 /** @brief Everything that is not configuration, grouped so it resets in one assignment. */
 struct RuntimeState {
-  uint32_t ms = 0;                 ///< Milliseconds since the launch release. The one clock.
-  uint32_t armedMs = 0;            ///< Milliseconds the machine has been armed.
-  uint32_t slewMs = 0;             ///< Milliseconds at which the retard slew was last advanced.
-  PpState speedState = PP_STATE_OFF; ///< State machine for page 18.
-  PpState rpmState = PP_STATE_OFF;   ///< State machine for page 19.
-  uint16_t rpmLimit = UINT16_MAX;  ///< Current RPM limit; UINT16_MAX = no limit.
-  PpLimitMethod limitMethod = PP_LIMIT_NONE;
-  uint16_t retardTenths = 0;       ///< Tenths requested by the curve + slip correction.
-  uint16_t retardSlewed = 0;       ///< Tenths actually published after slew limiting.
-  uint8_t dutyTrim = 0;            ///< Speed-mode boost duty trim, percent.
-  uint16_t axis = 0;               ///< Conditioned axis value (speed mode only).
-  int16_t slip = 0;                ///< Signed deviation from the reference wire.
-  bool prevArmSpeed = false;       ///< Previous arm level, page 18.
-  bool prevArmRpm = false;         ///< Previous arm level, page 19.
-  bool limiting = false;           ///< Limiter engaged (with hysteresis applied).
-  bool softActive = false;         ///< Soft-retard band engaged (RPM mode).
-  bool storageOk = false;          ///< The backend can hold both blocks.
-  bool axisSeen = false;           ///< A conditioned axis sample has been taken this attempt.
-  uint8_t speedArmPin = 0;         ///< Board pin the page-18 arm input resolved to.
-  uint8_t rpmArmPin = 0;           ///< Board pin the page-19 arm input resolved to.
+  // ---- speed mode ----
+  uint32_t ms = 0;                  ///< Milliseconds since the release. The speed mode's clock.
+  uint32_t armedMs = 0;             ///< Milliseconds armed.
+  uint32_t slewMs = 0;              ///< Milliseconds at which the retard slew last advanced.
+  PpState speedState = PP_STATE_OFF;
+  uint16_t axis = 0;                ///< Conditioned axis value.
+  int16_t slipMs = 0;               ///< Deviation from the reference-time wire.
+  uint16_t retardTenths = 0;        ///< Tenths requested.
+  uint16_t retardSlewed = 0;        ///< Tenths published after slew limiting.
+  uint8_t  speedStrategy = 0;       ///< Strategy bits in force.
+  uint16_t speedLimit = UINT16_MAX; ///< Limit from the speed page alone.
+
+  // ---- rpm mode ----
+  uint32_t rpmMs = 0;               ///< The rpm mode's own clock.
+  uint32_t rpmArmedMs = 0;
+  PpState rpmState = PP_STATE_OFF;
+  uint16_t rpmRetardTenths = 0;
+  uint8_t  rpmStrategy = 0;
+  uint16_t rpmLimit = UINT16_MAX;   ///< Limit from the rpm page alone.
+
+  // ---- shared ----
+  uint16_t limitHitMs = 0;          ///< Accumulated ms at the hard limit this pass.
+  int16_t fuelAdd = 0;              ///< Reaction: percent of pulse width.
+  int16_t boostDutyAdj = 0;         ///< Reaction: percent of duty.
+  int16_t boostTargetAdj = 0;       ///< Reaction: kPa.
+  uint16_t reactionRetardTenths = 0;///< Reaction: tenths of a degree.
+  bool limiting = false;
+  bool storageOk = false;
+  bool axisSeen = false;
+  uint8_t speedArmPin = 0;
+  uint8_t rpmArmPin = 0;
   bool speedPinBound = false;
   bool rpmPinBound = false;
-  uint32_t rpmMs = 0;              ///< Page 19's own clock. The two modes arm independently.
-  uint32_t rpmArmedMs = 0;         ///< Milliseconds page 19 has been armed.
-  uint8_t dirtyMask = 0;           ///< bit0 = speed page, bit1 = rpm page.
-  uint8_t initialisedMask = 0;     ///< bit0 = speed block intact at boot, bit1 = rpm block.
+  uint8_t dirtyMask = 0;            ///< bit per PpMode
+  uint8_t initialisedMask = 0;      ///< bit per PpMode
 
   void reset(void)
   {
     ms = 0U;
     armedMs = 0U;
     slewMs = 0U;
-    rpmMs = 0U;
-    rpmArmedMs = 0U;
     speedState = PP_STATE_OFF;
-    rpmState = PP_STATE_OFF;
-    rpmLimit = UINT16_MAX;
-    limitMethod = PP_LIMIT_NONE;
+    axis = 0U;
+    slipMs = 0;
     retardTenths = 0U;
     retardSlewed = 0U;
-    dutyTrim = 0U;
-    axis = 0U;
-    slip = 0;
+    speedStrategy = 0U;
+    speedLimit = UINT16_MAX;
+    rpmMs = 0U;
+    rpmArmedMs = 0U;
+    rpmState = PP_STATE_OFF;
+    rpmRetardTenths = 0U;
+    rpmStrategy = 0U;
+    rpmLimit = UINT16_MAX;
+    limitHitMs = 0U;
+    fuelAdd = 0;
+    boostDutyAdj = 0;
+    boostTargetAdj = 0;
+    reactionRetardTenths = 0U;
     limiting = false;
-    softActive = false;
     axisSeen = false;
   }
 };
@@ -103,13 +115,10 @@ struct RuntimeState {
 RuntimeState rt;
 
 #if defined(UNIT_TEST)
-/// @name Test injection points
-/// @{
-bool armOverrideActive = false; ///< When set, the arm level comes from armOverrideValue
-bool armOverrideValue = false;  ///< The injected arm level
-uint16_t axisOverride = 0;      ///< The injected raw axis reading
-bool axisOverrideActive = false;///< When set, the axis comes from axisOverride
-/// @}
+bool armOverrideActive = false;
+bool armOverrideValue = false;
+uint16_t axisOverride = 0;
+bool axisOverrideActive = false;
 #endif
 
 // =====================================================================================
@@ -119,67 +128,74 @@ bool axisOverrideActive = false;///< When set, the axis comes from axisOverride
 bool speedEnabled(void) { return ppLaunchSpeedData.enable == (uint8_t)PP_ENABLED; }
 bool rpmEnabled(void) { return ppLaunchRpmData.enable == (uint8_t)PP_ENABLED; }
 
-/** @brief True while the speed page is the one driving the outputs.
- *
- * Both pages are independent features with their own arm inputs, but only one set of outputs
- * exists, so one has to win when both are enabled. The speed page is the more specific
- * controller, so it takes precedence; a tuner who wants only the simple limiter enables only
- * the simple limiter.
- */
-bool speedModeActive(void) { return speedEnabled(); }
+constexpr uint8_t modeBit(PpMode mode) { return (uint8_t)(1U << (uint8_t)mode); }
 
 void markDirty(PpMode mode, bool dirty)
 {
-  const uint8_t mask = (mode == PP_MODE_RPM) ? 0x02U : 0x01U;
-  if (dirty) { rt.dirtyMask = (uint8_t)(rt.dirtyMask | mask); }
-  else { rt.dirtyMask = (uint8_t)(rt.dirtyMask & (uint8_t)(~mask)); }
+  const uint8_t bit = modeBit(mode);
+  if (dirty) { rt.dirtyMask = (uint8_t)(rt.dirtyMask | bit); }
+  else { rt.dirtyMask = (uint8_t)(rt.dirtyMask & (uint8_t)(~bit)); }
 }
 
-bool isDirty(PpMode mode)
-{
-  return (rt.dirtyMask & ((mode == PP_MODE_RPM) ? 0x02U : 0x01U)) != 0U;
-}
+bool isDirty(PpMode mode) { return (rt.dirtyMask & modeBit(mode)) != 0U; }
 
 uint16_t baseFor(PpMode mode)
 {
-  return (mode == PP_MODE_RPM) ? EEPROM_PPLAUNCH_RPM_BASE : EEPROM_PPLAUNCH_SPEED_BASE;
+  switch (mode)
+  {
+    case PP_MODE_RPM:   return EEPROM_PPLAUNCH_RPM_BASE;
+    case PP_MODE_REACT: return EEPROM_PPLAUNCH_REACT_BASE;
+    case PP_MODE_SPEED:
+    default:            return EEPROM_PPLAUNCH_SPEED_BASE;
+  }
 }
 
-uint16_t payloadFor(PpMode mode)
-{
-  return (mode == PP_MODE_RPM) ? EEPROM_PPLAUNCH_RPM_PAYLOAD : EEPROM_PPLAUNCH_SPEED_PAYLOAD;
-}
+uint16_t payloadFor(PpMode mode) { return (uint16_t)(baseFor(mode) + EEPROM_PPLAUNCH_HEADER_SIZE); }
 
 uint32_t magicFor(PpMode mode)
 {
-  return (mode == PP_MODE_RPM) ? EEPROM_PPLAUNCH_RPM_MAGIC : EEPROM_PPLAUNCH_SPEED_MAGIC;
+  switch (mode)
+  {
+    case PP_MODE_RPM:   return EEPROM_PPLAUNCH_RPM_MAGIC;
+    case PP_MODE_REACT: return EEPROM_PPLAUNCH_REACT_MAGIC;
+    case PP_MODE_SPEED:
+    default:            return EEPROM_PPLAUNCH_SPEED_MAGIC;
+  }
 }
 
-/** @brief km/h x10 to mph x10. 1 mph = 1.609344 km/h, so mph = km/h / 1.609344.
- *
- * The numerator is 32-bit because 160934 does not fit in a uint16_t and truncates to 29862 -
- * which turns a 10 mph threshold into 2 km/h. That compiles cleanly and is simply wrong.
- */
+void *payloadPtr(PpMode mode)
+{
+  switch (mode)
+  {
+    case PP_MODE_RPM:   return (void *)&ppLaunchRpmData;
+    case PP_MODE_REACT: return (void *)&ppLaunchReactData;
+    case PP_MODE_SPEED:
+    default:            return (void *)&ppLaunchSpeedData;
+  }
+}
+
+/** @brief km/h x10 to mph x10. The 32-bit numerator is mandatory - see the header. */
 uint16_t kmh10ToMph10(uint16_t kmh10)
 {
   return (uint16_t)(((uint32_t)kmh10 * PP_MPH_TO_KMH_DEN) / PP_MPH_TO_KMH_NUM);
 }
 
-/** @brief Clamp a tenths-of-a-degree value to the 60 degrees the scheduler can honour. */
-uint16_t clampTenths(uint16_t tenths)
-{
-  return (tenths > 600U) ? 600U : tenths;
-}
+uint16_t clampTenths(uint16_t t) { return (t > 600U) ? 600U : t; }
 
 void clearOutputs(void)
 {
+  rt.speedLimit = UINT16_MAX;
   rt.rpmLimit = UINT16_MAX;
-  rt.limitMethod = PP_LIMIT_NONE;
   rt.retardTenths = 0U;
   rt.retardSlewed = 0U;
-  rt.dutyTrim = 0U;
+  rt.rpmRetardTenths = 0U;
+  rt.speedStrategy = 0U;
+  rt.rpmStrategy = 0U;
+  rt.reactionRetardTenths = 0U;
+  rt.fuelAdd = 0;
+  rt.boostDutyAdj = 0;
+  rt.boostTargetAdj = 0;
   rt.limiting = false;
-  rt.softActive = false;
 }
 
 // =====================================================================================
@@ -189,18 +205,15 @@ void clearOutputs(void)
 /**
  * @brief Linear interpolation with signed delta and round-to-nearest.
  *
- * The delta MUST be signed: a descending curve - retard off the line then give the timing back,
- * or a reference wire that dips - is the common real shape, and an unsigned subtraction there
- * wraps to a huge positive number that then clamps to the curve maximum.
- *
- * Assumes @p axis is ascending in [0, count); the clamps guarantee that for every lookup key.
+ * The delta MUST be signed: a descending row is legitimate and an unsigned subtraction would wrap
+ * to a huge value that then clamps to the maximum.
  */
 template <typename TValue>
-uint16_t interpolateU16(const uint16_t *axis, const TValue *values, uint8_t count, uint32_t x)
+int32_t interpolate(const uint16_t *axis, const TValue *values, uint8_t count, uint32_t x)
 {
-  if (count == 0U) { return 0U; }
-  if (x <= (uint32_t)axis[0U]) { return (uint16_t)values[0U]; }
-  if (x >= (uint32_t)axis[count - 1U]) { return (uint16_t)values[count - 1U]; }
+  if (count == 0U) { return 0; }
+  if (x <= (uint32_t)axis[0U]) { return (int32_t)values[0U]; }
+  if (x >= (uint32_t)axis[count - 1U]) { return (int32_t)values[count - 1U]; }
 
   uint8_t index = 0U;
   for (uint8_t i = 1U; i < count; ++i)
@@ -210,11 +223,11 @@ uint16_t interpolateU16(const uint16_t *axis, const TValue *values, uint8_t coun
   }
 
   const uint8_t next = (uint8_t)(index + 1U);
-  if (next >= count) { return (uint16_t)values[index]; }
+  if (next >= count) { return (int32_t)values[index]; }
 
   const uint32_t a0 = (uint32_t)axis[index];
   const uint32_t a1 = (uint32_t)axis[next];
-  if (a1 <= a0) { return (uint16_t)values[index]; } // never divide by zero
+  if (a1 <= a0) { return (int32_t)values[index]; } // never divide by zero
 
   const int32_t v0 = (int32_t)values[index];
   const int32_t v1 = (int32_t)values[next];
@@ -226,37 +239,7 @@ uint16_t interpolateU16(const uint16_t *axis, const TValue *values, uint8_t coun
   const int64_t half = (int64_t)(full >> 1U);
   const int64_t rounded = (scaled >= 0) ? ((scaled + half) / (int64_t)full)
                                         : (-(((-scaled) + half) / (int64_t)full));
-
-  const int32_t result = v0 + (int32_t)rounded;
-  if (result <= 0) { return 0U; }
-  return (uint16_t)result;
-}
-
-/**
- * @brief The reference axis value at the current elapsed time.
- *
- * Past the last breakpoint the last value is held rather than extrapolated: extrapolating a
- * reference forward would keep declaring the car slow forever, and the slip correction would
- * never release.
- */
-uint16_t referenceAt(uint32_t ms)
-{
-  return interpolateU16(ppLaunchSpeedData.curveTime, ppLaunchSpeedData.curveAxis,
-                        PP_CURVE_POINTS, ms);
-}
-
-/** @brief The axis a speed-mode curve is looked up against, for the configured curve mode. */
-const uint16_t *lookupAxis(void)
-{
-  return (ppLaunchSpeedData.curveMode == (uint8_t)PP_CURVE_TIME)
-       ? ppLaunchSpeedData.curveTime
-       : ppLaunchSpeedData.curveAxis;
-}
-
-/** @brief The lookup key: elapsed time in time mode, the live axis in axis mode. */
-uint32_t lookupKey(void)
-{
-  return (ppLaunchSpeedData.curveMode == (uint8_t)PP_CURVE_TIME) ? rt.ms : (uint32_t)rt.axis;
+  return (int32_t)(v0 + (int32_t)rounded);
 }
 
 /**
@@ -264,32 +247,75 @@ uint32_t lookupKey(void)
  *
  * The slew is specified as tenths per SECOND and applied against elapsed milliseconds, not per
  * call. That matters because this runs once per main-loop pass and the pass rate is not a
- * constant: a per-call limit would make the real retard rate depend on how busy the loop was, so
- * the same tune would behave differently at idle and at 7000 RPM.
+ * constant: a per-call limit would make the real retard rate depend on how busy the loop was.
  */
-uint16_t advanceRetardSlew(uint16_t targetTenths, uint32_t nowMs, uint16_t slewTenthsPerSec)
+uint16_t advanceRetardSlew(uint16_t targetTenths, uint32_t nowMs, uint16_t msPerDegree,
+                           uint16_t currentTenths)
 {
-  if (slewTenthsPerSec == 0U) { return targetTenths; }
+  // 0 means "no slew": apply the target immediately. That is the default, because a slew is a
+  // refinement and an engine that needs timing pulled should not have to wait for a ramp.
+  if (msPerDegree == 0U) { return targetTenths; }
 
   const uint32_t elapsed = nowMs - rt.slewMs;
-  if (elapsed == 0U) { return rt.retardSlewed; }   // same millisecond: nothing may move yet
   rt.slewMs = nowMs;
 
-  // Multiply by elapsed BEFORE dividing: the other order truncates a slow slew to zero and it
-  // never moves at all.
-  const uint32_t budget = ((uint32_t)slewTenthsPerSec * elapsed) / 1000U;
+  // Allow `elapsed` milliseconds of movement at msPerDegree milliseconds per degree. Expressed in
+  // TENTHS so the arithmetic stays integral: one degree = 10 tenths, so the budget in tenths is
+  //   elapsed * 10 / msPerDegree
+  // Multiply before dividing, or a slow slew truncates to zero and never moves at all.
+  const uint32_t budget = ((uint32_t)elapsed * 10U) / (uint32_t)msPerDegree;
 
-  if (targetTenths > rt.retardSlewed)
+  if (targetTenths > currentTenths)
   {
-    const uint32_t risen = (uint32_t)rt.retardSlewed + budget;
+    const uint32_t risen = (uint32_t)currentTenths + budget;
     return (uint16_t)((risen > targetTenths) ? targetTenths : risen);
   }
-  if (targetTenths < rt.retardSlewed)
+  if (targetTenths < currentTenths)
   {
-    const uint32_t fall = (uint32_t)rt.retardSlewed - targetTenths;
-    return (uint16_t)((fall > budget) ? ((uint32_t)rt.retardSlewed - budget) : targetTenths);
+    const uint32_t fall = (uint32_t)currentTenths - targetTenths;
+    return (uint16_t)((fall > budget) ? ((uint32_t)currentTenths - budget) : targetTenths);
   }
   return targetTenths;
+}
+
+/**
+ * @brief The progressive retard across the soft zone.
+ *
+ * This is the heart of the feature and the thing an earlier draft got wrong. Retard does NOT snap
+ * to its table value when the soft limit is crossed. It ramps LINEARLY:
+ *
+ *     at the soft limit   -> 0
+ *     halfway through     -> half of maxRetard
+ *     at the hard limit   -> maxRetard
+ *
+ * A step change in advance is indistinguishable from a misfire, and it makes the car feel like it
+ * cut rather than like it is being managed. Just tripping the soft limit should pull barely
+ * anything; only actually reaching the hard limit should pull the whole value.
+ *
+ * @param maxRetardTenths The table value: what this speed/rpm can afford at the HARD limit.
+ * @param current         The live value being compared (axis or RPM).
+ * @param setpoint        The hard limit at this operating point.
+ * @param softPercent     Soft zone width as a percent of @p setpoint.
+ * @return Retard to apply, tenths of a degree.
+ */
+uint16_t progressiveRetard(uint16_t maxRetardTenths, uint32_t current, uint32_t setpoint,
+                           uint8_t softPercent)
+{
+  if ((maxRetardTenths == 0U) || (softPercent == 0U) || (setpoint == 0U)) { return 0U; }
+  if (current >= setpoint) { return maxRetardTenths; }
+
+  // The band starts this far below the setpoint.
+  const uint32_t band = ((uint32_t)setpoint * (uint32_t)softPercent) / 100U;
+  if (band == 0U) { return (current >= setpoint) ? maxRetardTenths : 0U; }
+
+  const uint32_t softLimit = (setpoint > band) ? (setpoint - band) : 0U;
+  if (current <= softLimit) { return 0U; }
+
+  // Linear ramp: 0 at softLimit, maxRetard at setpoint.
+  const uint32_t into = current - softLimit;
+  const uint32_t span = setpoint - softLimit;
+  const uint32_t scaled = ((uint32_t)maxRetardTenths * into) / span;
+  return (uint16_t)scaled;
 }
 
 } // anonymous namespace
@@ -298,102 +324,64 @@ uint16_t advanceRetardSlew(uint16_t targetTenths, uint32_t nowMs, uint16_t slewT
 // Defaults and clamps
 // =====================================================================================
 
-/**
- * @brief Reset the speed page to a safe, feature-disabled state.
- *
- * These values MUST match the `defaultValue =` entries for page 18 in reference/speeduino.ini.
- */
+/** @brief Reset the speed page. MUST match the page-18 defaultValue entries. */
 static void setSpeedDefaults(void)
 {
   memset(&ppLaunchSpeedData, 0, sizeof(ppLaunchSpeedData));
 
   ppLaunchSpeedData.enable = (uint8_t)PP_DISABLED;
-  ppLaunchSpeedData.armPin = 35U;          // pin 34 is the multiplexed VSS / cam-3 pin
-  ppLaunchSpeedData.armPolarity = 1U;      // active-low trans-brake switch is the common case
+  ppLaunchSpeedData.armPin = 35U;
+  ppLaunchSpeedData.armPolarity = 1U;
   ppLaunchSpeedData.armPullup = 0U;
   ppLaunchSpeedData.axisSource = (uint8_t)PP_AXIS_VSS_MPH10;
-  ppLaunchSpeedData.limitMethod = (uint8_t)PP_LIMIT_SPARK;
-  ppLaunchSpeedData.curveMode = (uint8_t)PP_CURVE_TIME;
+  ppLaunchSpeedData.limiterStrategy = (uint8_t)(PP_STRAT_BOOST_REDUCE | PP_STRAT_SPARK_CUT);
+  ppLaunchSpeedData.curveMode = (uint8_t)PP_CURVE_BY_AXIS;
   ppLaunchSpeedData.featureFlags = (uint8_t)(PP_FLAG_PERFECT_PASS | PP_FLAG_RETARD_SLEW
-                                           | PP_FLAG_SLIP_CORRECT | PP_FLAG_AXIS_CLAMP);
-
-  ppLaunchSpeedData.timeoutMs = 10000U;    // 10 s armed timeout
+                                           | PP_FLAG_AXIS_CLAMP);
+  ppLaunchSpeedData.timeoutMs = 10000U;
   ppLaunchSpeedData.rearmBelowAxis = 0U;
   ppLaunchSpeedData.startBelowAxis = 0U;
-  ppLaunchSpeedData.slipDeadband = 20U;    // 2.0 mph of deadband before slip correction acts
-  ppLaunchSpeedData.axisAccelLimit = 200U; // 20.0 mph per update - generous, but rejects a spike
-  ppLaunchSpeedData.retardSlewTenths = 3000U; ///< 3000 tenths/s = 300 deg/s
-  ppLaunchSpeedData.shaftRevPerKph = 0U;
-  ppLaunchSpeedData.maxGear = 0U;
-  ppLaunchSpeedData.axisFilterShift = 1U;  // light smoothing
+  ppLaunchSpeedData.softZonePercent = 10U;    ///< 10% of the setpoint
   ppLaunchSpeedData.limitHysteresis = 10U;
 
   const char *label = "speed";
-  const size_t len = strlen(label);
-  for (size_t i = 0U; (i < len) && (i < (size_t)(PP_LABEL_LEN - 1U)); ++i)
+  for (size_t i = 0U; (i < strlen(label)) && (i < (size_t)(PP_LABEL_LEN - 1U)); ++i)
   {
     ppLaunchSpeedData.label[i] = (uint8_t)label[i];
   }
 
-  // 32 points at 100 ms intervals: 0 .. 3100 ms.
-  static const uint16_t kTime[PP_CURVE_POINTS] = {
-      0U,  100U,  200U,  300U,  400U,  500U,  600U,  700U,
-    800U,  900U, 1000U, 1100U, 1200U, 1300U, 1400U, 1500U,
-   1600U, 1700U, 1800U, 1900U, 2000U, 2100U, 2200U, 2300U,
-   2400U, 2500U, 2600U, 2700U, 2800U, 2900U, 3000U, 3100U };
-
-  // Reference wire, tenths of a mph: 0 -> 71.8 mph in 3.1 s. Deliberately SHAPED rather than
-  // flat; a flat default is what you get when nobody thought about it, and a tuner reading a flat
-  // wire has no idea what the field is for.
-  static const uint16_t kWire[PP_CURVE_POINTS] = {
+  // ONE axis, 32 points, 0 -> ~720 mph x10 (72.0 mph), with a shape that most cars can follow.
+  static const uint16_t kAxis[PP_CURVE_POINTS] = {
       0U,  22U,  48U,  80U, 116U, 152U, 188U, 224U,
     258U, 292U, 324U, 356U, 386U, 414U, 442U, 468U,
     492U, 516U, 538U, 558U, 578U, 596U, 612U, 628U,
     642U, 656U, 668U, 680U, 690U, 700U, 710U, 718U };
 
-  // Retard, tenths of a degree: 12.0 deg at the hit, easing out. The shape a turbo drag car
-  // actually runs - pull timing to help the tyres live, then give it back.
+  // Row 2: max retard at this speed, tenths of a degree. Highest off the line where there is
+  // least traction, easing out as the car puts speed down.
   static const uint16_t kRetard[PP_CURVE_POINTS] = {
     120U, 118U, 114U, 108U, 100U,  90U,  78U,  66U,
      54U,  44U,  36U,  30U,  24U,  20U,  16U,  13U,
      10U,   8U,   6U,   5U,   4U,   4U,   3U,   3U,
       2U,   2U,   2U,   1U,   1U,   1U,   0U,   0U };
 
-  // Limit, whole RPM (1 RPM resolution, not the 100 RPM steps the classic 2-step byte gives).
-  static const uint16_t kLimit[PP_CURVE_POINTS] = {
-    6800U, 6800U, 6800U, 6750U, 6700U, 6650U, 6600U, 6550U,
-    6500U, 6450U, 6400U, 6400U, 6400U, 6400U, 6400U, 6400U,
-    6400U, 6400U, 6400U, 6400U, 6400U, 6400U, 6400U, 6400U,
-    6400U, 6400U, 6400U, 6400U, 6400U, 6400U, 6400U, 6400U };
-
-  // Slip response. Boost trim leads on purpose: pulling timing costs power everywhere, trimming
-  // boost only costs it where the tyres are actually spinning.
-  static const uint16_t kSlipBin[PP_SLIP_POINTS] = { 0U, 10U, 20U, 40U, 80U, 120U, 160U, 240U };
-  static const uint16_t kSlipRetard[PP_SLIP_POINTS] = { 0U, 0U, 10U, 20U, 40U, 60U, 80U, 100U };
-  static const uint8_t kSlipTrim[PP_SLIP_POINTS] = { 0U, 5U, 10U, 20U, 35U, 50U, 65U, 80U };
+  // Row 1: reference time at this speed, ms. The inverse shape of the axis, so the wire reads as
+  // "this speed should have been reached by now". 71.8 mph by 3.1 s.
+  static const uint16_t kTime[PP_CURVE_POINTS] = {
+      0U, 100U, 200U, 300U, 400U, 500U, 600U, 700U,
+    800U, 900U,1000U,1100U,1200U,1300U,1400U,1500U,
+   1600U,1700U,1800U,1900U,2000U,2100U,2200U,2300U,
+   2400U,2500U,2600U,2700U,2800U,2900U,3000U,3100U };
 
   for (uint8_t i = 0U; i < PP_CURVE_POINTS; ++i)
   {
-    ppLaunchSpeedData.curveTime[i] = kTime[i];
-    ppLaunchSpeedData.curveAxis[i] = kWire[i];
-    ppLaunchSpeedData.curveRetard[i] = kRetard[i];
-    ppLaunchSpeedData.curveLimit[i] = kLimit[i];
-    ppLaunchSpeedData.curveBoostTrim[i] = 0U;   // trim off by default: the limit does the work
-  }
-
-  for (uint8_t i = 0U; i < PP_SLIP_POINTS; ++i)
-  {
-    ppLaunchSpeedData.slipBin[i] = kSlipBin[i];
-    ppLaunchSpeedData.slipRetard[i] = kSlipRetard[i];
-    ppLaunchSpeedData.slipBoostTrim[i] = kSlipTrim[i];
+    ppLaunchSpeedData.axisSpeed[i] = kAxis[i];
+    ppLaunchSpeedData.rowRetard[i] = kRetard[i];
+    ppLaunchSpeedData.rowTimeMs[i] = kTime[i];
   }
 }
 
-/**
- * @brief Reset the RPM page to a safe, feature-disabled state.
- *
- * These values MUST match the `defaultValue =` entries for page 19 in reference/speeduino.ini.
- */
+/** @brief Reset the rpm page. MUST match the page-19 defaultValue entries. */
 static void setRpmDefaults(void)
 {
   memset(&ppLaunchRpmData, 0, sizeof(ppLaunchRpmData));
@@ -402,38 +390,78 @@ static void setRpmDefaults(void)
   ppLaunchRpmData.armPin = 35U;
   ppLaunchRpmData.armPolarity = 1U;
   ppLaunchRpmData.armPullup = 0U;
-  ppLaunchRpmData.cutMethod = (uint8_t)PP_LIMIT_SPARK;
+  ppLaunchRpmData.limiterStrategy = (uint8_t)(PP_STRAT_SPARK_CUT);
   ppLaunchRpmData.timeoutMs = 10000U;
-  ppLaunchRpmData.softZoneRpm = 300U;    // soft retard from 300 RPM below the limit
-  ppLaunchRpmData.softHystRpm = 100U;    // and it lets go 100 RPM lower still
-  ppLaunchRpmData.softRetardTenths = 80U;///< 8.0 degrees
-  ppLaunchRpmData.retardSlewTenths = 3000U; ///< 3000 tenths/s = 300 deg/s
+  ppLaunchRpmData.softZonePercent = 10U;
+  ppLaunchRpmData.limitHysteresis = 50U;
 
   const char *label = "rpm";
-  const size_t len = strlen(label);
-  for (size_t i = 0U; (i < len) && (i < (size_t)(PP_LABEL_LEN - 1U)); ++i)
+  for (size_t i = 0U; (i < strlen(label)) && (i < (size_t)(PP_LABEL_LEN - 1U)); ++i)
   {
     ppLaunchRpmData.label[i] = (uint8_t)label[i];
   }
 
-  // A limiter that ramps: the engine is held lower at the hit, when there is least traction, and
-  // allowed to climb as the car puts power down. Flat 6400 after 1.5 s.
-  static const uint16_t kTime[PP_RPM_CURVE_POINTS] = {
-      0U,  100U,  200U,  300U,  400U,  500U,  600U,  700U,
-    800U,  900U, 1000U, 1100U, 1200U, 1300U, 1400U, 1500U,
-   1600U, 1700U, 1800U, 1900U, 2000U, 2100U, 2200U, 2300U,
-   2400U, 2500U, 2600U, 2700U, 2800U, 2900U, 3000U, 3100U };
+  // One RPM axis, 3800 -> 7000 rpm.
+  static const uint16_t kAxis[PP_CURVE_POINTS] = {
+    3800U, 3903U, 4006U, 4110U, 4213U, 4316U, 4419U, 4523U,
+    4626U, 4729U, 4832U, 4935U, 5039U, 5142U, 5245U, 5348U,
+    5452U, 5555U, 5658U, 5761U, 5865U, 5968U, 6071U, 6174U,
+    6277U, 6381U, 6484U, 6587U, 6690U, 6794U, 6897U, 7000U };
 
-  static const uint16_t kLimit[PP_RPM_CURVE_POINTS] = {
-    4200U, 4300U, 4400U, 4500U, 4600U, 4700U, 4800U, 4900U,
-    5000U, 5100U, 5200U, 5300U, 5400U, 5500U, 5600U, 5700U,
-    5800U, 5900U, 6000U, 6100U, 6200U, 6300U, 6400U, 6400U,
-    6400U, 6400U, 6400U, 6400U, 6400U, 6400U, 6400U, 6400U };
+  static const uint16_t kRetard[PP_CURVE_POINTS] = {
+    100U, 100U, 98U, 96U, 94U, 92U, 90U, 86U,
+     82U,  78U, 74U, 70U, 66U, 62U, 58U, 54U,
+     50U,  46U, 42U, 38U, 34U, 30U, 26U, 22U,
+     18U,  14U, 10U,  8U,  6U,  4U,  2U,  0U };
 
-  for (uint8_t i = 0U; i < PP_RPM_CURVE_POINTS; ++i)
+  // Reference time at this RPM: reaching 7000 rpm should take about 3.1 s.
+  static const uint16_t kTime[PP_CURVE_POINTS] = {
+      0U, 100U, 200U, 300U, 400U, 500U, 600U, 700U,
+    800U, 900U,1000U,1100U,1200U,1300U,1400U,1500U,
+   1600U,1700U,1800U,1900U,2000U,2100U,2200U,2300U,
+   2400U,2500U,2600U,2700U,2800U,2900U,3000U,3100U };
+
+  for (uint8_t i = 0U; i < PP_CURVE_POINTS; ++i)
   {
-    ppLaunchRpmData.curveTime[i] = kTime[i];
-    ppLaunchRpmData.curveLimit[i] = kLimit[i];
+    ppLaunchRpmData.axisValue[i] = kAxis[i];
+    ppLaunchRpmData.rowRetard[i] = kRetard[i];
+    ppLaunchRpmData.rowTimeMs[i] = kTime[i];
+  }
+}
+
+/** @brief Reset the reactions page. MUST match the page-21 defaultValue entries. */
+static void setReactDefaults(void)
+{
+  memset(&ppLaunchReactData, 0, sizeof(ppLaunchReactData));
+
+  ppLaunchReactData.enable = (uint8_t)PP_DISABLED;
+
+  const char *label = "reactions";
+  for (size_t i = 0U; (i < strlen(label)) && (i < (size_t)(PP_LABEL_LEN - 1U)); ++i)
+  {
+    ppLaunchReactData.label[i] = (uint8_t)label[i];
+  }
+
+  // The axis is fixed. Stored so the ini and the firmware agree by inspection.
+  for (uint8_t i = 0U; i < PP_REACTION_POINTS; ++i)
+  {
+    ppLaunchReactData.axisTimeMs[i] = PP_REACTION_TIME_MS[i];
+  }
+
+  // A plausible reaction: nothing at 0, then progressively more of everything. The car is being
+  // held, so add fuel to keep it from going lean on the cut, pull boost duty so it makes less
+  // torque, and add a little retard on top of the table's.
+  static const uint16_t kFuel[PP_REACTION_POINTS] = { 0U, 2U, 4U, 6U, 8U, 10U };
+  static const int16_t  kDuty[PP_REACTION_POINTS] = { 0, -5, -10, -15, -20, -25 };
+  static const int16_t  kTgt[PP_REACTION_POINTS]  = { 0, -2, -4, -6, -8, -10 };
+  static const int16_t  kRet[PP_REACTION_POINTS]  = { 0, 0, 5, 10, 15, 20 };
+
+  for (uint8_t i = 0U; i < PP_REACTION_POINTS; ++i)
+  {
+    ppLaunchReactData.fuelAddPercent[i] = kFuel[i];
+    ppLaunchReactData.boostDutyAdj[i] = kDuty[i];
+    ppLaunchReactData.boostTargetAdj[i] = kTgt[i];
+    ppLaunchReactData.retardAdj[i] = kRet[i];
   }
 }
 
@@ -446,66 +474,32 @@ static void clampSpeedSettings(void)
   if (s.armPolarity > 1U) { s.armPolarity = 0U; }
   if (s.armPullup > 1U) { s.armPullup = 1U; }
   if (s.axisSource > (uint8_t)PP_AXIS_RPM) { s.axisSource = (uint8_t)PP_AXIS_VSS_MPH10; }
-  if (s.limitMethod > (uint8_t)PP_LIMIT_ROLLING) { s.limitMethod = (uint8_t)PP_LIMIT_SPARK; }
-  if (s.curveMode > (uint8_t)PP_CURVE_AXIS) { s.curveMode = (uint8_t)PP_CURVE_TIME; }
-  if (s.maxGear > 6U) { s.maxGear = 6U; }
-  if (s.axisFilterShift > 5U) { s.axisFilterShift = 5U; }
-  s.featureFlags = (uint8_t)(s.featureFlags & 0x3FU); // only the six defined flags exist
+  if (s.curveMode > (uint8_t)PP_CURVE_BY_TIME) { s.curveMode = (uint8_t)PP_CURVE_BY_AXIS; }
+  if (s.softZonePercent > 90U) { s.softZonePercent = 90U; } // 100% would mean a zero setpoint band
+  s.limiterStrategy = (uint8_t)(s.limiterStrategy & 0x0FU);
+  s.featureFlags = (uint8_t)(s.featureFlags & 0x0FU);
 
-  // The time axis must start at zero and be strictly ascending: it is a lookup key in time mode
-  // and the X axis of every curve in the editor.
-  s.curveTime[0] = 0U;
+  // The axis is the lookup key for BOTH rows, so it must be strictly ascending.
   for (uint8_t i = 1U; i < PP_CURVE_POINTS; ++i)
   {
-    if (s.curveTime[i] <= s.curveTime[i - 1U])
+    if (s.axisSpeed[i] <= s.axisSpeed[i - 1U])
     {
-      s.curveTime[i] = (s.curveTime[i - 1U] < 0xFFFFU)
-                     ? (uint16_t)(s.curveTime[i - 1U] + 1U)
-                     : s.curveTime[i - 1U];
-    }
-  }
-
-  // `curveAxis` is only forced monotonic in axis mode, where it IS the lookup key. In time mode
-  // it is the reference wire, and a car can legitimately be expected to slow down - forcing the
-  // wire to rise would compare the car against a fiction.
-  if (s.curveMode == (uint8_t)PP_CURVE_AXIS)
-  {
-    for (uint8_t i = 1U; i < PP_CURVE_POINTS; ++i)
-    {
-      if (s.curveAxis[i] <= s.curveAxis[i - 1U])
-      {
-        s.curveAxis[i] = (s.curveAxis[i - 1U] < 0xFFFFU)
-                       ? (uint16_t)(s.curveAxis[i - 1U] + 1U)
-                       : s.curveAxis[i - 1U];
-      }
+      s.axisSpeed[i] = (uint16_t)((s.axisSpeed[i - 1U] < 0xFFFFU)
+                                ? (s.axisSpeed[i - 1U] + 1U) : s.axisSpeed[i - 1U]);
     }
   }
 
   for (uint8_t i = 0U; i < PP_CURVE_POINTS; ++i)
   {
-    s.curveRetard[i] = clampTenths(s.curveRetard[i]);
-    // A limit of 0 means "no limiter at this point", which is legal. Anything else must be
-    // reachable: below 500 RPM it would act as a permanent hard cut.
-    if ((s.curveLimit[i] != 0U) && (s.curveLimit[i] < 500U)) { s.curveLimit[i] = 500U; }
-    if (s.curveBoostTrim[i] > 100U) { s.curveBoostTrim[i] = 100U; }
-  }
-
-  // The slip axis is a lookup key, so it must be strictly ascending.
-  s.slipBin[0] = 0U;
-  for (uint8_t i = 1U; i < PP_SLIP_POINTS; ++i)
-  {
-    if (s.slipBin[i] <= s.slipBin[i - 1U])
-    {
-      s.slipBin[i] = (uint16_t)(s.slipBin[i - 1U] + 1U);
-    }
-    s.slipRetard[i] = clampTenths(s.slipRetard[i]);
-    if (s.slipBoostTrim[i] > 100U) { s.slipBoostTrim[i] = 100U; }
+    s.rowRetard[i] = clampTenths(s.rowRetard[i]);
+    // The reference-time row is NOT a lookup key, so it is only sanity-bounded. A car can
+    // legitimately hold one speed for a while, so equal neighbours are allowed here.
   }
 
   s.label[PP_LABEL_LEN - 1U] = 0U;
 }
 
-/** @brief Clamp and repair the RPM page. */
+/** @brief Clamp and repair the rpm page. */
 static void clampRpmSettings(void)
 {
   ppLaunchRpmConfig &s = ppLaunchRpmData;
@@ -513,23 +507,50 @@ static void clampRpmSettings(void)
   if (s.enable > (uint8_t)PP_ENABLED) { s.enable = (uint8_t)PP_DISABLED; }
   if (s.armPolarity > 1U) { s.armPolarity = 0U; }
   if (s.armPullup > 1U) { s.armPullup = 1U; }
-  if (s.cutMethod > (uint8_t)PP_LIMIT_ROLLING) { s.cutMethod = (uint8_t)PP_LIMIT_SPARK; }
+  if (s.softZonePercent > 90U) { s.softZonePercent = 90U; }
+  s.limiterStrategy = (uint8_t)(s.limiterStrategy & 0x0FU);
 
-  s.softRetardTenths = clampTenths(s.softRetardTenths);
-
-  // The time axis must start at zero and be strictly ascending: it is the lookup key.
-  s.curveTime[0] = 0U;
-  for (uint8_t i = 1U; i < PP_RPM_CURVE_POINTS; ++i)
+  for (uint8_t i = 1U; i < PP_CURVE_POINTS; ++i)
   {
-    if (s.curveTime[i] <= s.curveTime[i - 1U])
+    if (s.axisValue[i] <= s.axisValue[i - 1U])
     {
-      s.curveTime[i] = (s.curveTime[i - 1U] < 0xFFFFU)
-                     ? (uint16_t)(s.curveTime[i - 1U] + 1U)
-                     : s.curveTime[i - 1U];
+      s.axisValue[i] = (uint16_t)((s.axisValue[i - 1U] < 0xFFFFU)
+                                ? (s.axisValue[i - 1U] + 1U) : s.axisValue[i - 1U]);
     }
-    // A limit of 0 means "no limiter at this point", which is legal and useful. Anything else
-    // must be reachable: below 500 RPM it would act as a permanent hard cut.
-    if ((s.curveLimit[i] != 0U) && (s.curveLimit[i] < 500U)) { s.curveLimit[i] = 500U; }
+  }
+  for (uint8_t i = 0U; i < PP_CURVE_POINTS; ++i)
+  {
+    s.rowRetard[i] = clampTenths(s.rowRetard[i]);
+  }
+
+  s.label[PP_LABEL_LEN - 1U] = 0U;
+}
+
+/** @brief Clamp and repair the reactions page. */
+static void clampReactSettings(void)
+{
+  ppLaunchReactConfig &s = ppLaunchReactData;
+
+  if (s.enable > (uint8_t)PP_ENABLED) { s.enable = (uint8_t)PP_DISABLED; }
+
+  // The axis is fixed. Forcing it here rather than trusting the stored bytes means a hand-edited
+  // or truncated block cannot shift the whole reaction ramp.
+  for (uint8_t i = 0U; i < PP_REACTION_POINTS; ++i)
+  {
+    s.axisTimeMs[i] = PP_REACTION_TIME_MS[i];
+  }
+
+  for (uint8_t i = 0U; i < PP_REACTION_POINTS; ++i)
+  {
+    // Fuel add is unsigned in storage but a sensible range is 0..100%.
+    if (s.fuelAddPercent[i] > 100U) { s.fuelAddPercent[i] = 100U; }
+    // Adjustments are signed; bound them to something a real tune can use.
+    if (s.boostDutyAdj[i] > 100) { s.boostDutyAdj[i] = 100; }
+    if (s.boostDutyAdj[i] < -100) { s.boostDutyAdj[i] = -100; }
+    if (s.boostTargetAdj[i] > 200) { s.boostTargetAdj[i] = 200; }
+    if (s.boostTargetAdj[i] < -200) { s.boostTargetAdj[i] = -200; }
+    if (s.retardAdj[i] > 600) { s.retardAdj[i] = 600; }
+    if (s.retardAdj[i] < 0) { s.retardAdj[i] = 0; }
   }
 
   s.label[PP_LABEL_LEN - 1U] = 0U;
@@ -539,8 +560,6 @@ static void clampRpmSettings(void)
 // Storage
 // =====================================================================================
 
-/** @brief CRC32 (IEEE, reflected) over a payload. Identical to the ltt / raceTime / boostLaunch
- *  implementations - one algorithm, four blocks, no chance of them disagreeing. */
 static uint32_t crc32Payload(const byte *pStart, const byte *pEnd)
 {
   uint32_t crc = 0xFFFFFFFFU;
@@ -568,30 +587,23 @@ struct ppLaunchBlockHeader
 static_assert(sizeof(ppLaunchBlockHeader) == EEPROM_PPLAUNCH_HEADER_SIZE,
               "Header size must match the block layout");
 
-/** @brief CRC32 of the live payload for a mode. Both payloads are 512 B, so one helper does. */
 static uint32_t payloadCrc(PpMode mode)
 {
-  const void *pStart = (mode == PP_MODE_RPM)
-                     ? (const void *)&ppLaunchRpmData
-                     : (const void *)&ppLaunchSpeedData;
-  const byte *p = (const byte *)pStart;
+  const byte *p = (const byte *)payloadPtr(mode);
   return crc32Payload(p, p + PPLAUNCH_PAYLOAD_SIZE);
 }
 
 static bool probeStorage(void)
 {
   const uint16_t length = getStorageAPI().length();
-  return (uint32_t)length >= ((uint32_t)EEPROM_PPLAUNCH_RPM_BASE + (uint32_t)PPLAUNCH_BLOCK_SIZE);
+  return (uint32_t)length >= ((uint32_t)EEPROM_PPLAUNCH_REACT_BASE + (uint32_t)PPLAUNCH_BLOCK_SIZE);
 }
 
 static bool payloadDiffers(PpMode mode)
 {
   byte stored[PPLAUNCH_PAYLOAD_SIZE];
   (void)loadBlock(getStorageAPI(), payloadFor(mode), stored, stored + PPLAUNCH_PAYLOAD_SIZE);
-  const void *live = (mode == PP_MODE_RPM)
-                   ? (const void *)&ppLaunchRpmData
-                   : (const void *)&ppLaunchSpeedData;
-  return memcmp(stored, live, PPLAUNCH_PAYLOAD_SIZE) != 0;
+  return memcmp(stored, payloadPtr(mode), PPLAUNCH_PAYLOAD_SIZE) != 0;
 }
 
 static void writeHeader(PpMode mode)
@@ -615,11 +627,7 @@ static void writeHeader(PpMode mode)
  */
 static uint16_t writeBlock(PpMode mode, uint16_t writesRemaining)
 {
-  const void *live = (mode == PP_MODE_RPM)
-                   ? (const void *)&ppLaunchRpmData
-                   : (const void *)&ppLaunchSpeedData;
-  const byte *pStart = (const byte *)live;
-
+  const byte *pStart = (const byte *)payloadPtr(mode);
   const uint16_t remaining = updateBlockLimitWriteOps(getStorageAPI(),
                                                      payloadFor(mode),
                                                      pStart,
@@ -640,10 +648,6 @@ static uint16_t writeBlock(PpMode mode, uint16_t writesRemaining)
 bool ppLaunchSave(PpMode mode)
 {
   if (!rt.storageOk) { return false; }
-
-  // A budget large enough that it can never be exhausted. Using the payload size here would be
-  // wrong: when every byte differs the budget is consumed exactly, which looks like "exhausted"
-  // and would skip the header write, leaving the block permanently dirty.
   (void)writeBlock(mode, UINT16_MAX);
   return !isDirty(mode);
 }
@@ -673,73 +677,52 @@ uint16_t ppLaunchSaveBlock(PpMode mode, uint16_t writesRemaining)
   return writeBlock(mode, writesRemaining);
 }
 
-void ppLaunchMarkDirty(PpMode mode)
-{
-  markDirty(mode, true);
-}
+void ppLaunchMarkDirty(PpMode mode) { markDirty(mode, true); }
 
 // =====================================================================================
 // Arm inputs
 // =====================================================================================
 
-/** @brief Bind one mode's arm pin as an input. Safe to call repeatedly. */
 static void bindArmPin(PpMode mode)
 {
-  const uint8_t configured = (mode == PP_MODE_RPM) ? ppLaunchRpmData.armPin
-                                                  : ppLaunchSpeedData.armPin;
-  const uint8_t pullup = (mode == PP_MODE_RPM) ? ppLaunchRpmData.armPullup
-                                               : ppLaunchSpeedData.armPullup;
-  uint8_t &boundPin = (mode == PP_MODE_RPM) ? rt.rpmArmPin : rt.speedArmPin;
-  bool &bound = (mode == PP_MODE_RPM) ? rt.rpmPinBound : rt.speedPinBound;
+  const bool isRpm = (mode == PP_MODE_RPM);
+  const uint8_t configured = isRpm ? ppLaunchRpmData.armPin : ppLaunchSpeedData.armPin;
+  const uint8_t pullup = isRpm ? ppLaunchRpmData.armPullup : ppLaunchSpeedData.armPullup;
+  uint8_t &boundPin = isRpm ? rt.rpmArmPin : rt.speedArmPin;
+  bool &bound = isRpm ? rt.rpmPinBound : rt.speedPinBound;
 
-  if (configured == 0U)
-  {
-    boundPin = 0U;
-    bound = false;
-    return;
-  }
+  if (configured == 0U) { boundPin = 0U; bound = false; return; }
 
-  // pinTranslate() maps the TunerStudio pin number to a board pin. Note what is NOT checked:
-  // pin 0. Zero is a perfectly valid board pin - board_definition.h defines NOT_A_PIN as
-  // UINT8_MAX precisely because zero cannot be used as the "unused" marker. Treating a
-  // translated 0 as "untranslatable" refuses pin 0 while accepting every reserved pin it could
-  // not actually use - a bug that already shipped once in this tree.
+  // Note what is NOT checked: pin 0. Zero is a perfectly valid board pin - board_definition.h
+  // defines NOT_A_PIN as UINT8_MAX precisely because zero cannot be the "unused" marker.
+  // Treating a translated 0 as "untranslatable" refuses pin 0 while accepting every reserved pin
+  // it could not use - a bug that already shipped once in this tree.
   const uint8_t pin = pinTranslate(configured);
-  if (pinIsReserved(pin) || pinIsOutput(pin))
-  {
-    // Reserved (SD card, serial) or already driven by the ECU: leave the input unbound rather
-    // than stealing a pin something else is using.
-    boundPin = 0U;
-    bound = false;
-    return;
-  }
+  if (pinIsReserved(pin) || pinIsOutput(pin)) { boundPin = 0U; bound = false; return; }
 
   boundPin = pin;
   pinMode(pin, (pullup != 0U) ? INPUT_PULLUP : INPUT);
   bound = true;
 }
 
-/** @brief Read one mode's arm input, applying its configured polarity. */
 static bool readArmPin(PpMode mode)
 {
 #if defined(UNIT_TEST)
   if (armOverrideActive) { return armOverrideValue; }
 #endif
-  const bool bound = (mode == PP_MODE_RPM) ? rt.rpmPinBound : rt.speedPinBound;
-  if (!bound) { return false; }
+  const bool isRpm = (mode == PP_MODE_RPM);
+  if (!(isRpm ? rt.rpmPinBound : rt.speedPinBound)) { return false; }
 
-  const uint8_t pin = (mode == PP_MODE_RPM) ? rt.rpmArmPin : rt.speedArmPin;
-  const uint8_t polarity = (mode == PP_MODE_RPM) ? ppLaunchRpmData.armPolarity
-                                                 : ppLaunchSpeedData.armPolarity;
+  const uint8_t pin = isRpm ? rt.rpmArmPin : rt.speedArmPin;
+  const uint8_t polarity = isRpm ? ppLaunchRpmData.armPolarity : ppLaunchSpeedData.armPolarity;
   const bool high = (digitalRead(pin) == HIGH);
   return (polarity == 0U) ? high : !high;
 }
 
 // =====================================================================================
-// Axis conditioning (speed mode only)
+// Axis (speed mode)
 // =====================================================================================
 
-/** @brief True if the configured axis source needs a working VSS input. */
 static bool axisNeedsVss(void)
 {
   const uint8_t src = ppLaunchSpeedData.axisSource;
@@ -748,46 +731,30 @@ static bool axisNeedsVss(void)
       || (src == (uint8_t)PP_AXIS_SHAFT_RPM);
 }
 
-/**
- * @brief Read the raw axis value, in the configured unit.
- *
- * `currentStatus.vss` is whole km/h at 50 Hz, so tenths are produced by multiplying by 10 rather
- * than by inventing resolution.
- */
 static uint16_t readRawAxis(const statuses &current)
 {
 #if defined(UNIT_TEST)
   if (axisOverrideActive) { return axisOverride; }
 #endif
-
   const uint16_t vss10 = (uint16_t)(current.vss * 10U);
 
   switch ((PpAxisSource)ppLaunchSpeedData.axisSource)
   {
-    case PP_AXIS_VSS_KPH10:
-      return vss10;
-
+    case PP_AXIS_VSS_KPH10: return vss10;
     case PP_AXIS_SHAFT_RPM:
-      // shaftRevPerKph is x100 to keep two decimals of a ratio. The intermediate is 32-bit
-      // because vss x ratio overflows 16 bits easily.
       return (uint16_t)(((uint32_t)current.vss * (uint32_t)ppLaunchSpeedData.shaftRevPerKph) / 100U);
-
-    case PP_AXIS_RPM:
-      return current.RPM;
-
+    case PP_AXIS_RPM: return current.RPM;
     case PP_AXIS_VSS_MPH10:
-    default:
-      return kmh10ToMph10(vss10); // vss is km/h; convert to tenths of a mph
+    default: return kmh10ToMph10(vss10);
   }
 }
 
 /**
  * @brief Condition the raw axis: spike clamp, then IIR smoothing.
  *
- * The spike clamp is the important one. A single noise tooth, or one wheel momentarily losing and
- * regaining signal, produces a reading that crosses every bin on the curve in one update - so the
- * curve's output goes from "leave hard" to "full retard" in a pass. Clamping the change per update
- * turns that into a reading that simply lags reality by a few milliseconds.
+ * The spike clamp matters: a single noise tooth crosses every bin on the curve in one update, so
+ * the output goes from "leave hard" to "full retard" in a pass. Clamping the change per update
+ * turns that into a reading that lags reality by a few milliseconds.
  */
 static uint16_t conditionAxis(uint16_t raw, bool first)
 {
@@ -815,8 +782,6 @@ static uint16_t conditionAxis(uint16_t raw, bool first)
   const uint8_t shift = cfg.axisFilterShift;
   if (shift == 0U) { return clamped; }
 
-  // IIR: axis += (raw - axis) / 2^shift. Signed intermediate, because the delta can be negative
-  // and an unsigned subtraction would wrap.
   const int32_t delta = (int32_t)clamped - (int32_t)rt.axis;
   const int32_t step = delta / (int32_t)(1U << shift);
   const int32_t next = (int32_t)rt.axis + step;
@@ -825,87 +790,34 @@ static uint16_t conditionAxis(uint16_t raw, bool first)
   return (uint16_t)next;
 }
 
-/** @brief Slip correction, added to the curve's own retard and duty trim. */
-static void applySlipCorrection(uint16_t &retardTenths, uint16_t &dutyTrim)
-{
-  const ppLaunchSpeedConfig &cfg = ppLaunchSpeedData;
-  if ((cfg.featureFlags & PP_FLAG_PERFECT_PASS) == 0U) { return; }
-  if ((cfg.featureFlags & PP_FLAG_SLIP_CORRECT) == 0U) { return; }
-
-  // Only positive deviation is "slip". Being behind the wire means the car is slower than the
-  // reference - a bog, a soft launch, a lifted throttle - and pulling timing for that would make
-  // it slower still. That asymmetry is the difference between a correction and a mistake.
-  const int16_t deadband = (int16_t)cfg.slipDeadband;
-  if (rt.slip <= deadband) { return; }
-
-  const uint32_t excess = (uint32_t)(rt.slip - deadband);
-
-  const uint16_t extraRetard = interpolateU16(cfg.slipBin, cfg.slipRetard, PP_SLIP_POINTS, excess);
-  const uint16_t extraTrim = interpolateU16(cfg.slipBin, cfg.slipBoostTrim, PP_SLIP_POINTS, excess);
-
-  retardTenths = clampTenths((uint16_t)(retardTenths + extraRetard));
-  const uint16_t trimSum = (uint16_t)dutyTrim + extraTrim;
-  dutyTrim = (trimSum > 100U) ? 100U : trimSum;
-}
-
-/** @brief True if the current gear is within the configured gate. */
-static bool gearGatePasses(const statuses &current)
-{
-  const ppLaunchSpeedConfig &cfg = ppLaunchSpeedData;
-  if ((cfg.featureFlags & PP_FLAG_GEAR_GATE) == 0U) { return true; }
-  if (cfg.maxGear == 0U) { return true; }
-  if (current.gear == 0U) { return true; }  // gear unknown: do not block a launch on it
-  return current.gear <= cfg.maxGear;
-}
-
 // =====================================================================================
 // State machines
 // =====================================================================================
 
-/** @brief Advance one mode's state machine by a millisecond. Shared by both modes. */
-static void tickStateMachine(PpState &state, bool &prevArm, bool arm, uint16_t timeoutMs,
+static void tickStateMachine(PpState &state, bool arm, bool prevArm, uint16_t timeoutMs,
                              uint32_t &armedMs, uint32_t &ms)
 {
   switch (state)
   {
     case PP_STATE_OFF:
     case PP_STATE_IDLE:
-      // Arming is what starts the sequence.
-      if (arm)
-      {
-        state = PP_STATE_ARMED;
-        ms = 0U;
-        armedMs = 0U;
-      }
-      else
-      {
-        state = PP_STATE_IDLE;
-        ms = 0U;
-      }
+      if (arm) { state = PP_STATE_ARMED; ms = 0U; armedMs = 0U; }
+      else { state = PP_STATE_IDLE; ms = 0U; }
       break;
 
     case PP_STATE_ARMED:
       if (arm)
       {
-        // The timeout is what stops a car that got armed on the highway from sitting armed
-        // indefinitely - the same failure MS3 users work around by spoofing the VSS to zero.
+        // The timeout stops a car that got armed on the highway from sitting armed indefinitely.
         ++armedMs;
-        if ((timeoutMs != 0U) && (armedMs >= (uint32_t)timeoutMs))
-        {
-          state = PP_STATE_TIMEOUT;
-        }
-        else
-        {
-          ms = 0U;
-        }
+        if ((timeoutMs != 0U) && (armedMs >= (uint32_t)timeoutMs)) { state = PP_STATE_TIMEOUT; }
+        else { ms = 0U; }
       }
       else
       {
         // Release edge: the clock starts here. Release, not assertion - the run begins when the
-        // trans-brake or the clutch is let go, which is when the car actually moves.
-        state = PP_STATE_LAUNCHING;
-        ms = 0U;
-        armedMs = 0U;
+        // trans-brake or clutch is let go, which is when the car actually moves.
+        state = PP_STATE_LAUNCHING; ms = 0U; armedMs = 0U;
       }
       break;
 
@@ -915,26 +827,12 @@ static void tickStateMachine(PpState &state, bool &prevArm, bool arm, uint16_t t
 
     case PP_STATE_COMPLETE:
     case PP_STATE_TIMEOUT:
-      // Only a fresh assertion re-enters the sequence, so a completed pass is re-run by the driver
-      // pressing the arm input again - which is exactly how a second attempt happens.
-      if (arm && !prevArm)
-      {
-        state = PP_STATE_ARMED;
-        armedMs = 0U;
-        ms = 0U;
-      }
-      else if (!arm && (state == PP_STATE_TIMEOUT))
-      {
-        // A timeout is an aborted arming, not a result: releasing the input returns to idle so the
-        // driver can simply try again.
-        state = PP_STATE_IDLE;
-      }
+      if (arm && !prevArm) { state = PP_STATE_ARMED; armedMs = 0U; ms = 0U; }
+      else if (!arm && (state == PP_STATE_TIMEOUT)) { state = PP_STATE_IDLE; }
       else
       {
-        // COMPLETE latches, deliberately, even though the arm input is released during a pass -
-        // the driver let go to launch, so falling back to IDLE would destroy the only record that
-        // the run finished. The state is what tells a tuner reading the log why the limiter
-        // stopped, and it must survive until the next attempt.
+        // COMPLETE latches deliberately: the driver released the arm input to launch, so falling
+        // back to IDLE would destroy the only record that the run finished.
       }
       break;
 
@@ -942,63 +840,46 @@ static void tickStateMachine(PpState &state, bool &prevArm, bool arm, uint16_t t
       state = PP_STATE_OFF; // MISRA
       break;
   }
-
-  prevArm = arm;
 }
 
 void ppLaunchTick1ms(statuses &current)
 {
   (void)current;
 
-  // ---- speed page (page 18) ----------------------------------------------------------
+  static bool prevArmSpeed = false;
+  static bool prevArmRpm = false;
+
+  // ---- speed page (page 18) ------------------------------------------------------------
   if (speedEnabled())
   {
     const bool arm = readArmPin(PP_MODE_SPEED);
-    tickStateMachine(rt.speedState, rt.prevArmSpeed, arm, ppLaunchSpeedData.timeoutMs,
+    tickStateMachine(rt.speedState, arm, prevArmSpeed, ppLaunchSpeedData.timeoutMs,
                      rt.armedMs, rt.ms);
-
-    // The speed page's clock is the shared one, and the pass is over when its curve runs out.
-    if (rt.speedState == PP_STATE_LAUNCHING)
-    {
-      const uint16_t lastTime = ppLaunchSpeedData.curveTime[PP_CURVE_POINTS - 1U];
-      if ((ppLaunchSpeedData.curveMode == (uint8_t)PP_CURVE_TIME)
-          && (lastTime != 0U) && (rt.ms > (uint32_t)lastTime))
-      {
-        rt.speedState = PP_STATE_COMPLETE;
-        clearOutputs();
-      }
-    }
+    prevArmSpeed = arm;
   }
   else
   {
     rt.speedState = PP_STATE_OFF;
-    rt.prevArmSpeed = false;
-    if (!rpmEnabled()) { rt.ms = 0U; }
+    prevArmSpeed = false;
+    rt.ms = 0U;
+    rt.armedMs = 0U;
   }
 
-  // ---- rpm page (page 19) ------------------------------------------------------------
-  // It keeps its own clock so that enabling both pages does not have them fighting over one
-  // counter. The two are armed independently and could legitimately be at different points.
+  // ---- rpm page (page 19) --------------------------------------------------------------
+  // Both modes run at once, so they keep separate clocks: enabling both must not have them
+  // fighting over one counter. The two are armed independently and could legitimately be at
+  // different points in their curves.
   if (rpmEnabled())
   {
     const bool arm = readArmPin(PP_MODE_RPM);
-    tickStateMachine(rt.rpmState, rt.prevArmRpm, arm, ppLaunchRpmData.timeoutMs,
+    tickStateMachine(rt.rpmState, arm, prevArmRpm, ppLaunchRpmData.timeoutMs,
                      rt.rpmArmedMs, rt.rpmMs);
-
-    if (rt.rpmState == PP_STATE_LAUNCHING)
-    {
-      const uint16_t lastTime = ppLaunchRpmData.curveTime[PP_RPM_CURVE_POINTS - 1U];
-      if ((lastTime != 0U) && (rt.rpmMs > (uint32_t)lastTime))
-      {
-        rt.rpmState = PP_STATE_COMPLETE;
-        clearOutputs();
-      }
-    }
+    prevArmRpm = arm;
   }
   else
   {
     rt.rpmState = PP_STATE_OFF;
-    rt.prevArmRpm = false;
+    prevArmRpm = false;
     rt.rpmMs = 0U;
     rt.rpmArmedMs = 0U;
   }
@@ -1010,190 +891,189 @@ void ppLaunchTick1ms(statuses &current)
 
 namespace {
 
+/** @brief Accumulate time at the hard limit, saturating at the reaction axis's last point. */
+void accumulateLimitHit(bool limiting, uint16_t maxMs)
+{
+  if (!limiting)
+  {
+    // Reset only when the limit has genuinely been left alone. This counter is "how long have we
+    // been fighting the limit", so a single millisecond off it ends the episode.
+    rt.limitHitMs = 0U;
+    return;
+  }
+  if (rt.limitHitMs < maxMs) { ++rt.limitHitMs; }
+}
+
+/** @brief Evaluate the reactions table against the accumulated time at the limit. */
+void updateReactions(void)
+{
+  if ((ppLaunchReactData.enable != (uint8_t)PP_ENABLED) || (rt.limitHitMs == 0U))
+  {
+    rt.fuelAdd = 0;
+    rt.boostDutyAdj = 0;
+    rt.boostTargetAdj = 0;
+    rt.reactionRetardTenths = 0U;
+    return;
+  }
+
+  const uint32_t ms = rt.limitHitMs;
+
+  rt.fuelAdd = (int16_t)interpolate(ppLaunchReactData.axisTimeMs,
+                                    ppLaunchReactData.fuelAddPercent, PP_REACTION_POINTS, ms);
+  rt.boostDutyAdj = (int16_t)interpolate(ppLaunchReactData.axisTimeMs,
+                                         ppLaunchReactData.boostDutyAdj, PP_REACTION_POINTS, ms);
+  rt.boostTargetAdj = (int16_t)interpolate(ppLaunchReactData.axisTimeMs,
+                                           ppLaunchReactData.boostTargetAdj, PP_REACTION_POINTS, ms);
+  rt.reactionRetardTenths = (uint16_t)interpolate(ppLaunchReactData.axisTimeMs,
+                                                  ppLaunchReactData.retardAdj, PP_REACTION_POINTS, ms);
+}
+
 /** @brief Evaluate the speed page (page 18). */
 void updateSpeedMode(const statuses &current, const config2 &page2)
 {
   const ppLaunchSpeedConfig &cfg = ppLaunchSpeedData;
 
-  // A speed-based curve on a car with no VSS configured reads zero forever, which would hold the
-  // limiter and the retard engaged for the whole pass with no indication why. Refuse to run
-  // rather than applying a curve to a sensor that does not exist.
   const bool vssMissing = axisNeedsVss() && (page2.vssMode == VSS_MODE_OFF);
   if (vssMissing)
   {
-    clearOutputs();
     rt.axis = 0U;
-    rt.slip = 0;
+    rt.slipMs = 0;
     rt.axisSeen = false;
+    rt.speedLimit = UINT16_MAX;
+    rt.speedStrategy = 0U;
+    rt.retardTenths = 0U;
+    rt.retardSlewed = 0U;
     ppLaunchAxisLog = 0U;
     ppLaunchSlipLog = 0;
     return;
   }
 
-  // ---- axis conditioning ---------------------------------------------------------------
-  // Only the build-up is treated as a fresh sample. During a pass the axis must be conditioned
-  // continuously, or the spike clamp would be bypassed exactly when the car moves fastest.
   rt.axis = conditionAxis(readRawAxis(current), !rt.axisSeen);
   rt.axisSeen = true;
   ppLaunchAxisLog = rt.axis;
 
-  // ---- reference wire and slip ---------------------------------------------------------
-  const bool wireValid = (cfg.curveMode == (uint8_t)PP_CURVE_TIME)
-                      && ((cfg.featureFlags & PP_FLAG_PERFECT_PASS) != 0U);
-  if (wireValid)
+  // ---- reference-time wire -------------------------------------------------------------
+  // The car is compared against the time it SHOULD have taken to reach this speed. A positive
+  // deviation means it got here early, which on a speed axis is the signature of wheelspin.
+  if ((cfg.featureFlags & PP_FLAG_PERFECT_PASS) != 0U)
   {
-    rt.slip = (int16_t)((int32_t)rt.axis - (int32_t)referenceAt(rt.ms));
+    const int32_t reference = interpolate(cfg.axisSpeed, cfg.rowTimeMs, PP_CURVE_POINTS, rt.axis);
+    rt.slipMs = (int16_t)(reference - (int32_t)rt.ms);
   }
   else
   {
-    // In axis mode there is no time-based wire: the axis IS the reference, so there is nothing to
-    // deviate from and slip correction is not meaningful.
-    rt.slip = 0;
+    rt.slipMs = 0;
   }
-  ppLaunchSlipLog = rt.slip;
+  ppLaunchSlipLog = rt.slipMs;
 
   // ---- re-arm --------------------------------------------------------------------------
-  // Evaluated here, not in the tick, because this is where the axis has just been read. A driver
-  // who aborts a pass must not have to key off to reset the module.
   if ((rt.speedState == PP_STATE_LAUNCHING) && (cfg.rearmBelowAxis != 0U)
       && ((uint32_t)rt.axis < (uint32_t)cfg.rearmBelowAxis))
   {
     rt.speedState = PP_STATE_IDLE;
     rt.ms = 0U;
-    clearOutputs();
+    rt.speedLimit = UINT16_MAX;
+    rt.retardTenths = 0U;
+    rt.retardSlewed = 0U;
+    return;
   }
 
   if (rt.speedState != PP_STATE_LAUNCHING)
   {
-    clearOutputs();
+    rt.speedLimit = UINT16_MAX;
+    rt.speedStrategy = 0U;
+    rt.retardTenths = 0U;
+    rt.retardSlewed = 0U;
     return;
   }
 
-  const uint32_t key = lookupKey();
-  const uint16_t *axis = lookupAxis();
+  // ---- the soft-zone retard ------------------------------------------------------------
+  // Max retard at this speed, then ramped linearly from zero at the soft limit up to that value
+  // at the hard limit. Just tripping the soft limit should pull barely anything.
+  const uint16_t maxRetard = (uint16_t)interpolate(cfg.axisSpeed, cfg.rowRetard, PP_CURVE_POINTS, rt.axis);
 
-  // ---- retard --------------------------------------------------------------------------
-  uint16_t retardTenths = interpolateU16(axis, cfg.curveRetard, PP_CURVE_POINTS, key);
-  uint16_t dutyTrim = interpolateU16(axis, cfg.curveBoostTrim, PP_CURVE_POINTS, key);
-  if (wireValid) { applySlipCorrection(retardTenths, dutyTrim); }
+  // The setpoint the soft zone is measured against. Page 18's own table does not carry an RPM
+  // limit (page 19 owns that), so the speed page's soft zone is measured against its HARD speed
+  // gate: the point at which the speed limiter is fully engaged.
+  // The setpoint for the soft zone is the top of the table's axis: the same figure that closes
+  // the launch window and therefore the hard limit. Measuring the band against anything else
+  // makes the retard reach its fully value somewhere other than the limit, which is the one
+  // thing the ramp must not do.
+  const uint32_t setpoint = (uint32_t)cfg.axisSpeed[PP_CURVE_POINTS - 1U];
+  rt.retardTenths = (setpoint != 0U)
+                  ? progressiveRetard(maxRetard, rt.axis, setpoint, cfg.softZonePercent)
+                  : maxRetard;
 
-  rt.retardTenths = clampTenths(retardTenths);
-  const uint16_t slew = ((cfg.featureFlags & PP_FLAG_RETARD_SLEW) != 0U)
-                      ? cfg.retardSlewTenths : 0U;
-  rt.retardSlewed = advanceRetardSlew(rt.retardTenths, rt.ms, slew);
+  rt.retardSlewed = advanceRetardSlew(rt.retardTenths, rt.ms,
+                                      ((cfg.featureFlags & PP_FLAG_RETARD_SLEW) != 0U)
+                                        ? cfg.retardSlewMsPerDeg : 0U,
+                                      rt.retardSlewed);
 
-  // ---- RPM limit -----------------------------------------------------------------------
-  const uint16_t curveLimit = interpolateU16(axis, cfg.curveLimit, PP_CURVE_POINTS, key);
+  // ---- the launch window ---------------------------------------------------------------
+  // The limiter engages while the car is still inside the launch window, which ends at the TOP
+  // of the table's axis: past that speed the launch is over and normal control resumes.
+  //
+  // `startBelowAxis` is an OPTIONAL extra gate the tuner can set. It is deliberately NOT the
+  // same thing as the setpoint the soft zone measures against - conflating the two meant the
+  // limiter released exactly at the point where it should have been at full authority.
+  const uint32_t windowTop = (uint32_t)cfg.axisSpeed[PP_CURVE_POINTS - 1U];
+  // Inclusive of the top: at exactly the last column the limiter is at FULL authority, which is
+  // the whole point of the soft-zone ramp ending there. The launch ends when the car goes past it.
+  const bool inWindow = (rt.axis <= windowTop)
+                     && ((cfg.startBelowAxis == 0U)
+                         || ((uint32_t)rt.axis < (uint32_t)cfg.startBelowAxis));
 
-  // The start gate is a speed window: the limiter may only engage below it, so a car that has
-  // already left does not get caught by the launch limiter on the top end.
-  const bool startGateOk = (cfg.startBelowAxis == 0U)
-                        || ((uint32_t)rt.axis < (uint32_t)cfg.startBelowAxis);
-  const bool wantLimit = (cfg.limitMethod != (uint8_t)PP_LIMIT_NONE)
-                      && startGateOk
-                      && gearGatePasses(current)
-                      && (curveLimit != 0U);
+  const bool gearOk = ((cfg.featureFlags & PP_FLAG_GEAR_GATE) == 0U)
+                   || (cfg.maxGear == 0U) || (current.gear == 0U)
+                   || (current.gear <= cfg.maxGear);
 
-  // Hysteresis on the gate: once engaged the limiter stays engaged until the axis has fallen below
-  // the gate by limitHysteresis. Without it a car sitting exactly on the gate chatters the limiter
-  // on and off, which sounds like a backfire and ruins the launch.
-  if (wantLimit)
+  if (inWindow && gearOk && (cfg.limiterStrategy != 0U))
   {
-    rt.limiting = true;
-  }
-  else if (!startGateOk && (cfg.startBelowAxis != 0U))
-  {
-    const uint32_t releaseAt = (cfg.startBelowAxis > cfg.limitHysteresis)
-                             ? (uint32_t)(cfg.startBelowAxis - cfg.limitHysteresis) : 0U;
-    rt.limiting = ((uint32_t)rt.axis < releaseAt);
+    rt.speedStrategy = cfg.limiterStrategy;
+    // The limit in force is the speed at which the launch window closes: that is the hard limit
+    // this page owns. The RPM limit, if any, comes from page 19 and is arbitrated separately.
+    rt.speedLimit = (windowTop != 0U) ? (uint16_t)windowTop : UINT16_MAX;
   }
   else
   {
-    rt.limiting = false;
+    rt.speedStrategy = 0U;
+    rt.speedLimit = UINT16_MAX;
   }
-
-  if (rt.limiting)
-  {
-    rt.rpmLimit = curveLimit;
-    rt.limitMethod = (PpLimitMethod)cfg.limitMethod;
-  }
-  else
-  {
-    rt.rpmLimit = UINT16_MAX;
-    rt.limitMethod = PP_LIMIT_NONE;
-  }
-
-  rt.dutyTrim = ((cfg.featureFlags & PP_FLAG_DUTY_TRIM) != 0U) ? (uint8_t)dutyTrim : 0U;
 }
 
-/** @brief Evaluate the RPM page (page 19).
- *
- * Deliberately simple: an RPM limit that follows a time ramp, and a soft retard that engages
- * within `softZoneRpm` of that limit with hysteresis so it does not flicker at the boundary.
- */
+/** @brief Evaluate the rpm page (page 19). */
 void updateRpmMode(const statuses &current)
 {
   const ppLaunchRpmConfig &cfg = ppLaunchRpmData;
 
   if (rt.rpmState != PP_STATE_LAUNCHING)
   {
-    // The soft-retard slew has to keep advancing while ARMED too, so that it has a notion of
-    // elapsed time at the moment the pass starts rather than jumping on the first millisecond.
-    rt.retardTenths = 0U;
-    rt.retardSlewed = 0U;
-    rt.slewMs = rt.ms;
     rt.rpmLimit = UINT16_MAX;
-    rt.limitMethod = PP_LIMIT_NONE;
-    rt.limiting = false;
-    rt.softActive = false;
+    rt.rpmStrategy = 0U;
+    rt.rpmRetardTenths = 0U;
     return;
   }
 
-  // The rpm page's own clock, kept in ppLaunchTick1ms. One definition of "elapsed" for this mode.
-  const uint32_t ms = rt.rpmMs;
+  // The hard limit at this RPM. The axis IS the RPM, so the limit is the axis value itself: the
+  // table says "at 6000 rpm you may have 6000 rpm", which is how a setpoint-versus-rpm table is
+  // read. The retard row shapes the approach.
+  // The setpoint at this RPM is the RPM itself: the table says "at 6000 rpm the limit is 6000".
+  const uint16_t setpoint = current.RPM;
+  const uint16_t maxRetard = (uint16_t)interpolate(cfg.axisValue, cfg.rowRetard, PP_CURVE_POINTS,
+                                                   current.RPM);
 
-  const uint16_t limit = interpolateU16(cfg.curveTime, cfg.curveLimit, PP_RPM_CURVE_POINTS, ms);
+  rt.rpmRetardTenths = progressiveRetard(maxRetard, current.RPM, setpoint, cfg.softZonePercent);
 
-  const bool haveLimit = (cfg.cutMethod != (uint8_t)PP_LIMIT_NONE) && (limit != 0U);
-  rt.limitMethod = haveLimit ? (PpLimitMethod)cfg.cutMethod : PP_LIMIT_NONE;
-  rt.rpmLimit = haveLimit ? limit : UINT16_MAX;
-  rt.limiting = haveLimit;
-
-  // ---- soft retard band ----------------------------------------------------------------
-  // Engages within softZoneRpm BELOW the limit and releases only once the engine has dropped a
-  // further softHystRpm. Without the hysteresis the retard flickers on and off at the boundary,
-  // which is worse than not having it: the timing jumps about instead of easing.
-  // NOTE: gated on the LIMIT VALUE, not on haveLimit. "No cut (retard only)" is an explicit menu
-  // option and must still get its soft retard - gating this on a cut method being configured made
-  // the most useful combination (retard, no hard cut) silently do nothing.
-  const bool haveBand = (cfg.softZoneRpm != 0U) && (limit != 0U);
-  if (haveBand)
+  if (cfg.limiterStrategy != 0U)
   {
-    const uint32_t engageAt = (limit > cfg.softZoneRpm) ? (uint32_t)(limit - cfg.softZoneRpm) : 0U;
-    const uint32_t releaseAt = (engageAt > cfg.softHystRpm)
-                             ? (engageAt - cfg.softHystRpm) : 0U;
-
-    if ((uint32_t)current.RPM >= engageAt)
-    {
-      rt.softActive = true;
-    }
-    else if (rt.softActive && ((uint32_t)current.RPM < releaseAt))
-    {
-      rt.softActive = false;
-    }
-    else
-    {
-      // Between releaseAt and engageAt: hold whatever the previous state was. That is the
-      // hysteresis band doing its job.
-    }
+    rt.rpmLimit = setpoint;
+    rt.rpmStrategy = cfg.limiterStrategy;
   }
   else
   {
-    rt.softActive = false;
+    rt.rpmLimit = UINT16_MAX;
+    rt.rpmStrategy = 0U;
   }
-
-  rt.retardTenths = rt.softActive ? cfg.softRetardTenths : 0U;
-  rt.retardSlewed = advanceRetardSlew(rt.retardTenths, ms, cfg.retardSlewTenths);
 }
 
 } // anonymous namespace
@@ -1204,37 +1084,57 @@ void ppLaunchUpdate(statuses &current, const config2 &page2)
   {
     clearOutputs();
     rt.axis = 0U;
-    rt.slip = 0;
+    rt.slipMs = 0;
     ppLaunchAxisLog = 0U;
     ppLaunchSlipLog = 0;
     return;
   }
 
-  if (speedModeActive())
+  // Both modes are evaluated. They are independent controllers that are meant to run together:
+  // the speed page shapes the launch, the rpm page is a hard ceiling.
+  if (speedEnabled()) { updateSpeedMode(current, page2); } else { rt.speedLimit = UINT16_MAX; rt.speedStrategy = 0U; }
+  if (rpmEnabled())   { updateRpmMode(current); }        else { rt.rpmLimit = UINT16_MAX; rt.rpmStrategy = 0U; }
+
+  // ---- arbitration: the LOWER limit wins ------------------------------------------------
+  // The strategy follows whichever mode is actually binding, so the cut method applied is the one
+  // the tuner configured on the page that caught the engine.
+  if (rt.rpmLimit < rt.speedLimit)
   {
-    updateSpeedMode(current, page2);
+    rt.limiting = (rt.rpmLimit != UINT16_MAX);
+    rt.speedStrategy = 0U;
   }
   else
   {
-    updateRpmMode(current);
+    rt.limiting = (rt.speedLimit != UINT16_MAX);
+    rt.rpmStrategy = 0U;
   }
 
+  // ---- reactions, keyed on accumulated time at the hard limit --------------------------
+  accumulateLimitHit(rt.limiting, PP_REACTION_TIME_MS[PP_REACTION_POINTS - 1U]);
+  updateReactions();
+
+  // ---- retard --------------------------------------------------------------------------
+  // The larger of the two modes' retard: both are asking for timing out of the same engine, and
+  // the bus would take the largest anyway, but doing it here keeps the published number equal to
+  // the number the reactions adjusted.
+  uint16_t retardTenths = (rt.rpmRetardTenths > rt.retardSlewed)
+                        ? rt.rpmRetardTenths : rt.retardSlewed;
+  retardTenths = clampTenths((uint16_t)(retardTenths + rt.reactionRetardTenths));
+
+  const uint8_t retardWhole = (uint8_t)((retardTenths + 5U) / 10U);
+
   // Retard leaves through the torque bus so the arbiter's "largest single request wins" rule can
-  // stop it stacking with the race-time curve or a future traction controller. Publishing every
-  // pass is required by the bus contract: there is no "cancel", so a state that stops launching
-  // simply stops asking.
-  const uint8_t retardWhole = (uint8_t)((rt.retardSlewed + 5U) / 10U);
+  // stop it stacking with the race-time curve or a future traction controller.
   torqueRequestRetard(TorqueProducer::Launch, (int8_t)retardWhole);
 
-  // Publish the snapshot for logging. Done here rather than in the accessors so a log entry and
-  // the applied values can never disagree about which evaluation they belong to.
+  // ---- publish for logging -------------------------------------------------------------
   current.ppLaunchAxis = rt.axis;
-  current.ppLaunchSlip = rt.slip;
-  current.ppLaunchLimit = (rt.rpmLimit == UINT16_MAX) ? 0U : rt.rpmLimit;
+  current.ppLaunchSlip = rt.slipMs;
+  current.ppLaunchLimit = (ppLaunchRpmLimit() == UINT16_MAX) ? 0U : ppLaunchRpmLimit();
   current.ppLaunchRetard = retardWhole;
   current.ppLaunchState = (uint8_t)ppLaunchState();
   current.ppLaunchStatus = (uint8_t)(((rt.limiting ? 1U : 0U) << 0U)
-                                   | (((rt.dutyTrim != 0U) ? 1U : 0U) << 1U)
+                                   | (((rt.limitHitMs != 0U) ? 1U : 0U) << 1U)
                                    | ((uint8_t)torqueBusRetardProducer() << 2U));
 }
 
@@ -1242,10 +1142,9 @@ void ppLaunchUpdate(statuses &current, const config2 &page2)
 // Boot
 // =====================================================================================
 
-/** @brief Load one block, repairing or defaulting it as required. */
 static void loadBlock(PpMode mode)
 {
-  const uint8_t bit = (mode == PP_MODE_RPM) ? 0x02U : 0x01U;
+  const uint8_t bit = modeBit(mode);
 
   ppLaunchBlockHeader header;
   (void)loadObject(getStorageAPI(), baseFor(mode), header);
@@ -1255,30 +1154,38 @@ static void loadBlock(PpMode mode)
 
   if (!magicOk)
   {
-    // Never initialised by this build, or written by an incompatible version. Start clean and lay
-    // down a valid header so the next boot takes the fast path.
-    if (mode == PP_MODE_RPM) { setRpmDefaults(); clampRpmSettings(); }
-    else { setSpeedDefaults(); clampSpeedSettings(); }
+    switch (mode)
+    {
+      case PP_MODE_RPM:   setRpmDefaults();   clampRpmSettings();   break;
+      case PP_MODE_REACT: setReactDefaults(); clampReactSettings(); break;
+      case PP_MODE_SPEED:
+      default:            setSpeedDefaults(); clampSpeedSettings(); break;
+    }
     rt.initialisedMask = (uint8_t)(rt.initialisedMask & (uint8_t)(~bit));
     markDirty(mode, true);
     (void)ppLaunchSave(mode);
     return;
   }
 
-  if (mode == PP_MODE_RPM)
+  switch (mode)
   {
-    (void)loadObject(getStorageAPI(), payloadFor(mode), ppLaunchRpmData);
-    clampRpmSettings();
-  }
-  else
-  {
-    (void)loadObject(getStorageAPI(), payloadFor(mode), ppLaunchSpeedData);
-    clampSpeedSettings();
+    case PP_MODE_RPM:
+      (void)loadObject(getStorageAPI(), payloadFor(mode), ppLaunchRpmData);
+      clampRpmSettings();
+      break;
+    case PP_MODE_REACT:
+      (void)loadObject(getStorageAPI(), payloadFor(mode), ppLaunchReactData);
+      clampReactSettings();
+      break;
+    case PP_MODE_SPEED:
+    default:
+      (void)loadObject(getStorageAPI(), payloadFor(mode), ppLaunchSpeedData);
+      clampSpeedSettings();
+      break;
   }
 
-  // Repair FIRST, then verify: the repair is what makes a slightly damaged block usable, but it
-  // also changes bytes, so the CRC must be taken against the repaired payload. Discarding a
-  // tuner's whole curve because the axis needed one breakpoint nudged would be a worse outcome.
+  // Repair FIRST, then verify: the repair makes a slightly damaged block usable, but changes
+  // bytes, so the CRC must be taken against the repaired payload.
   if (header.crc != payloadCrc(mode))
   {
     rt.initialisedMask = (uint8_t)(rt.initialisedMask & (uint8_t)(~bit));
@@ -1301,12 +1208,9 @@ void initialisePpLaunch(statuses &current)
 
   if (!rt.storageOk)
   {
-    // Cannot persist anything. Lay down safe defaults so nothing is applied from a block we could
-    // not have read.
-    setSpeedDefaults();
-    clampSpeedSettings();
-    setRpmDefaults();
-    clampRpmSettings();
+    setSpeedDefaults(); clampSpeedSettings();
+    setRpmDefaults();   clampRpmSettings();
+    setReactDefaults(); clampReactSettings();
     bindArmPin(PP_MODE_SPEED);
     bindArmPin(PP_MODE_RPM);
     return;
@@ -1314,6 +1218,7 @@ void initialisePpLaunch(statuses &current)
 
   loadBlock(PP_MODE_SPEED);
   loadBlock(PP_MODE_RPM);
+  loadBlock(PP_MODE_REACT);
 
   bindArmPin(PP_MODE_SPEED);
   bindArmPin(PP_MODE_RPM);
@@ -1321,45 +1226,60 @@ void initialisePpLaunch(statuses &current)
 
 void ppLaunchRestoreDefaults(void)
 {
-  setSpeedDefaults();
-  clampSpeedSettings();
-  setRpmDefaults();
-  clampRpmSettings();
+  setSpeedDefaults(); clampSpeedSettings();
+  setRpmDefaults();   clampRpmSettings();
+  setReactDefaults(); clampReactSettings();
   markDirty(PP_MODE_SPEED, true);
   markDirty(PP_MODE_RPM, true);
+  markDirty(PP_MODE_REACT, true);
 }
 
 // =====================================================================================
 // Accessors
 // =====================================================================================
 
-PpState ppLaunchState(void)
+uint16_t ppLaunchRpmLimit(void)
 {
-  // The active mode's state is the one that means anything to a consumer.
-  return speedModeActive() ? rt.speedState : rt.rpmState;
+  return (rt.rpmLimit < rt.speedLimit) ? rt.rpmLimit : rt.speedLimit;
+}
+
+uint8_t ppLaunchStrategy(void)
+{
+  return (uint8_t)(rt.rpmStrategy | rt.speedStrategy);
+}
+
+PpState ppLaunchState(void) { return rt.speedState; }
+PpState ppLaunchRpmState(void) { return rt.rpmState; }
+
+uint8_t ppLaunchRetard(void)
+{
+  uint16_t t = (rt.rpmRetardTenths > rt.retardSlewed) ? rt.rpmRetardTenths : rt.retardSlewed;
+  t = clampTenths((uint16_t)(t + rt.reactionRetardTenths));
+  return (uint8_t)((t + 5U) / 10U);
+}
+
+int16_t ppLaunchFuelAdd(void) { return rt.fuelAdd; }
+int16_t ppLaunchBoostDutyAdj(void) { return rt.boostDutyAdj; }
+int16_t ppLaunchBoostTargetAdj(void) { return rt.boostTargetAdj; }
+uint16_t ppLaunchLimitHitMs(void) { return rt.limitHitMs; }
+uint16_t ppLaunchAxisValue(void) { return rt.axis; }
+int16_t ppLaunchSlipMs(void) { return rt.slipMs; }
+bool ppLaunchIsLimiting(void) { return rt.limiting; }
+bool ppLaunchIsAvailable(void) { return rt.storageOk; }
+
+PpMode ppLaunchActiveMode(void)
+{
+  // Which page is actually binding.
+  if (rt.rpmLimit < rt.speedLimit) { return PP_MODE_RPM; }
+  return speedEnabled() ? PP_MODE_SPEED : PP_MODE_RPM;
 }
 
 uint32_t ppLaunchElapsedMs(void)
 {
-  // Zero unless actually launching, so a consumer cannot act on a stale elapsed time from a
-  // previous attempt.
   return (rt.speedState == PP_STATE_LAUNCHING) ? rt.ms : 0U;
 }
 
-uint16_t ppLaunchRpmLimit(void) { return rt.rpmLimit; }
-PpLimitMethod ppLaunchLimitMethod(void) { return rt.limitMethod; }
-uint8_t ppLaunchRetard(void) { return (uint8_t)((rt.retardSlewed + 5U) / 10U); }
-uint8_t ppLaunchBoostTrim(void) { return rt.dutyTrim; }
-PpMode ppLaunchActiveMode(void) { return speedModeActive() ? PP_MODE_SPEED : PP_MODE_RPM; }
-uint16_t ppLaunchAxisValue(void) { return rt.axis; }
-int16_t ppLaunchSlip(void) { return rt.slip; }
-bool ppLaunchIsLimiting(void) { return rt.limiting; }
-bool ppLaunchIsAvailable(void) { return rt.storageOk; }
-
-bool ppLaunchIsActive(void)
-{
-  return speedEnabled() || rpmEnabled();
-}
+bool ppLaunchIsActive(void) { return speedEnabled() || rpmEnabled(); }
 
 void ppLaunchReset(void)
 {
@@ -1371,12 +1291,14 @@ void ppLaunchReset(void)
 
 ppLaunchSpeedBlock &ppLaunchGetSpeedPageMutable(void) { return ppLaunchSpeedData; }
 ppLaunchRpmBlock &ppLaunchGetRpmPageMutable(void) { return ppLaunchRpmData; }
+ppLaunchReactBlock &ppLaunchGetReactPageMutable(void) { return ppLaunchReactData; }
 const ppLaunchSpeedBlock &ppLaunchGetSpeedPage(void) { return ppLaunchSpeedData; }
 const ppLaunchRpmBlock &ppLaunchGetRpmPage(void) { return ppLaunchRpmData; }
+const ppLaunchReactBlock &ppLaunchGetReactPage(void) { return ppLaunchReactData; }
 
 bool ppLaunchIsInitialised(PpMode mode)
 {
-  return (rt.initialisedMask & ((mode == PP_MODE_RPM) ? 0x02U : 0x01U)) != 0U;
+  return (rt.initialisedMask & modeBit(mode)) != 0U;
 }
 
 #if defined(UNIT_TEST)
@@ -1394,23 +1316,13 @@ void ppLaunchResetForTest(void)
   armOverrideValue = false;
   axisOverride = 0U;
   axisOverrideActive = false;
-  setSpeedDefaults();
-  clampSpeedSettings();
-  setRpmDefaults();
-  clampRpmSettings();
+  setSpeedDefaults(); clampSpeedSettings();
+  setRpmDefaults();   clampRpmSettings();
+  setReactDefaults(); clampReactSettings();
   ppLaunchAxisLog = 0U;
   ppLaunchSlipLog = 0;
 }
 
-void ppLaunchSetAxisForTest(uint16_t axis)
-{
-  axisOverride = axis;
-  axisOverrideActive = true;
-}
-
-void ppLaunchSetArmForTest(bool asserted)
-{
-  armOverrideValue = asserted;
-  armOverrideActive = true;
-}
+void ppLaunchSetAxisForTest(uint16_t axis) { axisOverride = axis; axisOverrideActive = true; }
+void ppLaunchSetArmForTest(bool asserted) { armOverrideValue = asserted; armOverrideActive = true; }
 #endif

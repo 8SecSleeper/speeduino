@@ -241,7 +241,8 @@ static void test_sumEntity_matches_pageSize(void)
         128, 288, 288, 128, 288, 128, 240, 384, 192, 192, 288, 192, 128, 288, 256, 2064, 256,
         512,   // page 18: launch control, speed based
         512,   // page 19: launch control, RPM based (simple: time vs RPM + soft retard)
-        1024   // page 20: launch boost target (in the Boost menu)
+        1024,  // page 20: launch boost target (in the Boost menu)
+        512    // page 21: launch control reactions
     };
     static_assert(sizeof(ini_page_sizes) / sizeof(ini_page_sizes[0]) == MAX_PAGE_NUM,
                   "ini_page_sizes must have one entry per page - extend it when adding a page");
